@@ -487,7 +487,7 @@ function clone_file {
         
         if [ $REMOTE -eq 1 ]; then
             # Generate and check remote ports
-            if [ -z ${REMOTE_PORT} ]; then
+            if [ -z "${REMOTE_PORT}" ]; then
                 remote_port_generation
             fi
 			CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
@@ -601,7 +601,7 @@ function clone_block {
 		
 		if [ $REMOTE -eq 1 ]; then
             # Generate and check remote ports
-            if [ -z ${REMOTE_PORT} ]; then
+            if [ -z "${REMOTE_PORT}" ]; then
                 remote_port_generation
             fi
 			CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
