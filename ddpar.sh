@@ -659,7 +659,7 @@ function clone_block {
         fi
 		
 		echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
-		eval ${FULL_CMD}
+		eval "${FULL_CMD}"
     done
 }
 
@@ -779,7 +779,7 @@ case $MODE in
             FULL_CMD="${FULL_CMD} | $OUTPUT_CMD &"
         fi
         echo "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
-        eval ${FULL_CMD}
+        eval "${FULL_CMD}"
         done
         
         

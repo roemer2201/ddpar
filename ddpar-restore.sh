@@ -62,7 +62,7 @@ function restore_split_image {
       fallocate -l ${INPUT_SIZE} $OUTPUT_FILE
     fi
     echo "$FULL_CMD"
-    eval $FULL_CMD
+    eval "${FULL_CMD}"
   done
 }
 
