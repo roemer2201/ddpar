@@ -62,7 +62,7 @@ function restore_split_image {
       fallocate -l ${INPUT_SIZE} $OUTPUT_FILE
     fi
     echo "$FULL_CMD"
-    eval $FULL_CMD
+    eval "${FULL_CMD}"
   done
 }
 
@@ -105,8 +105,8 @@ if [ -e $OUTPUT ]; then
     # Wenn OUTPUT_FILE ein Blockdevice ist, prüfen, ob OUTPUT_FILE groß genug ist.
     "block special"*)
       OUTPUT_SIZE=$(blockdev --getsize64 $OUTPUT)
-      if [ "$BLOCKSIZEBYTES" -gt "$OUTPUT_SIZE" ]; then
-        echo "Fehler: Die Eingabegröße ($BLOCKSIZEBYTES) ist größer als die Ausgabegröße ($OUTPUT_SIZE)."
+      if [ "$INPUT_SIZE" -gt "$OUTPUT_SIZE" ]; then
+        echo "Fehler: Die Eingabegröße ($INPUT_SIZE) ist größer als die Ausgabegröße ($OUTPUT_SIZE)."
         exit 1
       fi
       OUTPUT_FILE="$OUTPUT"

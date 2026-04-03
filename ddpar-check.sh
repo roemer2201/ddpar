@@ -93,11 +93,11 @@ if [ ! -z "${BASE_PATH}" ]; then
   echo ${BASE_FILE_NAME}
   echo ${BASE_FILES}\*
 fi
-if [ ! -z $SOURCE ]; then
+if [ ! -z "$SOURCE" ]; then
   INPUT_FILE=$SOURCE
   INPUT_FILE_TYPE="$(file -b $SOURCE)"
 fi
-if [ ! -z $DESTINATION ]; then
+if [ ! -z "$DESTINATION" ]; then
 OUTPUT_FILE=$DESTINATION
 OUTPUT_FILE_TYPE="$(file -b $DESTINATION)"
 fi

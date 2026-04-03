@@ -487,7 +487,7 @@ function clone_file {
         
         if [ $REMOTE -eq 1 ]; then
             # Generate and check remote ports
-            if [ -z ${REMOTE_PORT} ]; then
+            if [ -z "${REMOTE_PORT}" ]; then
                 remote_port_generation
             fi
 			CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
@@ -532,12 +532,12 @@ function clone_file {
 			done
 			
 			# Wenn nach allen Versuchen der Prozess nicht gefunden wurde, mit Fehler beenden
-			if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
+			if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
 				echo -e "${INFOCOLOR}Process did not start on port ${CURRENT_REMOTE_PORT} after $MAX_ATTEMPTS attempts."
 				INTERNAL_EXITCODE=2
 				return 1
 			fi
-    
+
             INPUT_CMD_REMOTE_EXTENSION="nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}"
             FULL_CMD="${FULL_CMD} | ${INPUT_CMD_REMOTE_EXTENSION} &"
         else
@@ -601,7 +601,7 @@ function clone_block {
 		
 		if [ $REMOTE -eq 1 ]; then
             # Generate and check remote ports
-            if [ -z ${REMOTE_PORT} ]; then
+            if [ -z "${REMOTE_PORT}" ]; then
                 remote_port_generation
             fi
 			CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
@@ -646,12 +646,12 @@ function clone_block {
 			done
 			
 			# Wenn nach allen Versuchen der Prozess nicht gefunden wurde, mit Fehler beenden
-			if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
+			if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
 				echo -e "${INFOCOLOR}Process did not start on port ${CURRENT_REMOTE_PORT} after $MAX_ATTEMPTS attempts."
 				INTERNAL_EXITCODE=2
 				return 1
 			fi
-    
+
             INPUT_CMD_REMOTE_EXTENSION="nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}"
             FULL_CMD="${FULL_CMD} | ${INPUT_CMD_REMOTE_EXTENSION} &"
         else
@@ -659,7 +659,7 @@ function clone_block {
         fi
 		
 		echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
-		eval ${FULL_CMD}
+		eval "${FULL_CMD}"
     done
 }
 
@@ -779,7 +779,7 @@ case $MODE in
             FULL_CMD="${FULL_CMD} | $OUTPUT_CMD &"
         fi
         echo "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
-        eval ${FULL_CMD}
+        eval "${FULL_CMD}"
         done
         
         
