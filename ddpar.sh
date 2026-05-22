@@ -340,10 +340,8 @@ function output_analysis {
 
 function remote_port_generation {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    # Generiere eine Zufallszahl zwischen 0 und 45000
-    REMOTE_PORT=$(( RANDOM % 55001 ))
-    # Füge 10000 hinzu, um den Bereich auf 10000 bis 55000 zu erweitern und addiere zusätzlich
-    REMOTE_PORT=$(( REMOTE_PORT + 10000 ))
+    # RANDOM yields 0-32767, so the effective port range is 10000-42767
+    REMOTE_PORT=$(( RANDOM + 10000 ))
 }
 
 function check_remote_port_availability {
