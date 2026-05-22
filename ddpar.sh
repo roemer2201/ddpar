@@ -348,7 +348,7 @@ function remote_port_generation {
 
 function check_remote_port_availability {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    execute_remote_command "ss -tln | grep -q \":${CURRENT_REMOTE_PORT}\""
+    execute_remote_command "ss -tln | grep -qE \":${CURRENT_REMOTE_PORT}[^0-9]\""
     # Port is free, if exit code is not zero
     if [[ $? != 0 ]]; then
         return 0
@@ -515,7 +515,7 @@ function clone_file {
 				echo -e "${INFOCOLOR}Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)...${NOCOLOR}"
 				
 				# Remote-Befehl zum Prüfen, ob der Prozess auf dem Port läuft
-				if execute_remote_command "ss -tln | grep -q :${CURRENT_REMOTE_PORT}"; then
+				if execute_remote_command "ss -tln | grep -qE :${CURRENT_REMOTE_PORT}[^0-9]"; then
 					echo -e "${INFOCOLOR}Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop.${NOCOLOR}"
 					break
 				else
@@ -629,7 +629,7 @@ function clone_block {
 				echo -e "${INFOCOLOR}Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)...${NOCOLOR}"
 				
 				# Remote-Befehl zum Prüfen, ob der Prozess auf dem Port läuft
-				if execute_remote_command "ss -tln | grep -q :${CURRENT_REMOTE_PORT}"; then
+				if execute_remote_command "ss -tln | grep -qE :${CURRENT_REMOTE_PORT}[^0-9]"; then
 					echo -e "${INFOCOLOR}Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop.${NOCOLOR}"
 					break
 				else
