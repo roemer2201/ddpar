@@ -374,7 +374,7 @@ function size_calculation {
       for ((i=${NUM_JOBS}; i<$((${NUM_JOBS}**2)); i++)); do
         if [ $((INPUT_SIZE % i)) -eq 0 ] && [ $(( $((INPUT_SIZE / i)) % BLOCKSIZEBYTES)) -eq 0 ]; then
           #echo "i=${i} - ${INPUT_SIZE}/${NUM_JOBS} = $((INPUT_SIZE % i)) - SPLIT_SIZE: $(( $((INPUT_SIZE / i)) % BLOCKSIZEBYTES))"
-          echo -e "${SUCCESSCOLOR}INFO: The next higher usable Threadnumber is $i (at same Blocksize of ${BLOCKSIZEBYTES}${}"
+          echo -e "${SUCCESSCOLOR}INFO: The next higher usable Threadnumber is $i (at same Blocksize of ${BLOCKSIZEBYTES})${NOCOLOR}"
           break
         fi
       done
