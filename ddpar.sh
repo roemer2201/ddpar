@@ -778,7 +778,7 @@ case $MODE in
             OUTPUT_CMD="dd of=${OUTPUT_FILE}${PART_NUM}.part bs=${BLOCKSIZEBYTES}"
             FULL_CMD="${FULL_CMD} | $OUTPUT_CMD &"
         fi
-        echo "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
+        echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
         eval "${FULL_CMD}"
         done
         
