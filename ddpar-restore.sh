@@ -83,12 +83,12 @@ if [ ! -e "$METADATA_FILE" ]; then
   exit 1
 fi
 NUM_JOBS=$(grep "NUM_JOBS" $METADATA_FILE | cut -d "=" -f 2)
-FILE_NAME=$(grep "FILE_NAME" $METADATA_FILE | cut -d "=" -f 2)
+FILE_NAME=$(grep "^FILE_NAME=" $METADATA_FILE | cut -d "=" -f 2)
 SPLIT_SIZE=$(grep "SPLIT_SIZE" $METADATA_FILE | cut -d "=" -f 2)
 INPUT_SIZE=$(grep "INPUT_SIZE" $METADATA_FILE | cut -d "=" -f 2)
 INPUT_FILE_TYPE=$(grep "FILE_TYPE" $METADATA_FILE | cut -d "=" -f 2)
 BLOCKSIZEBYTES=$(grep "BLOCKSIZEBYTES" $METADATA_FILE | cut -d "=" -f 2)
-COMPRESSION=$(grep "COMPRESSION" $METADATA_FILE | cut -d "=" -f 2)
+COMPRESSION=$(grep "^COMPRESSION=" $METADATA_FILE | cut -d "=" -f 2)
 COMPRESSION_LEVEL=$(grep "COMPRESSION_LEVEL" $METADATA_FILE | cut -d "=" -f 2)
 
 # Überprüfung der erforderlichen Parameter
