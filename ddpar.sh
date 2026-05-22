@@ -515,7 +515,7 @@ function clone_file {
 				echo -e "${INFOCOLOR}Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)...${NOCOLOR}"
 				
 				# Remote-Befehl zum Prüfen, ob der Prozess auf dem Port läuft
-				if execute_remote_command "ss -tuln | grep -q :${CURRENT_REMOTE_PORT}"; then
+				if execute_remote_command "ss -tln | grep -q :${CURRENT_REMOTE_PORT}"; then
 					echo -e "${INFOCOLOR}Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop.${NOCOLOR}"
 					break
 				else
@@ -629,7 +629,7 @@ function clone_block {
 				echo -e "${INFOCOLOR}Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)...${NOCOLOR}"
 				
 				# Remote-Befehl zum Prüfen, ob der Prozess auf dem Port läuft
-				if execute_remote_command "ss -tuln | grep -q :${CURRENT_REMOTE_PORT}"; then
+				if execute_remote_command "ss -tln | grep -q :${CURRENT_REMOTE_PORT}"; then
 					echo -e "${INFOCOLOR}Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop.${NOCOLOR}"
 					break
 				else
