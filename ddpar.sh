@@ -306,17 +306,17 @@ function input_analysis {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
   # Determine the type of the input file
   echo -e "${INFOCOLOR}Analysiere INPUT${NOCOLOR}"
-  INPUT_FILE_TYPE=$(file -b ${INPUT})
+  INPUT_FILE_TYPE=$(file -b "${INPUT}")
   echo "\$INPUT_FILE_TYPE = $INPUT_FILE_TYPE"
-  
+
   # Use the appropriate command to calculate the size of the input file
   if [[ "${INPUT_FILE_TYPE}" == "block special"* ]]; then
     #echo "INPUT_SIZE=$(blockdev --getsize64 $INPUT)"
-    INPUT_SIZE=$(blockdev --getsize64 ${INPUT})
-    echo "\$INPUT_SIZE=${INPUT_SIZE=}"
+    INPUT_SIZE=$(blockdev --getsize64 "${INPUT}")
+    echo "\$INPUT_SIZE=${INPUT_SIZE}"
   else
-    INPUT_SIZE=$(stat -c %s ${INPUT})
-    echo "\$INPUT_SIZE=${INPUT_SIZE=}"
+    INPUT_SIZE=$(stat -c %s "${INPUT}")
+    echo "\$INPUT_SIZE=${INPUT_SIZE}"
   fi
 }
 
@@ -324,15 +324,15 @@ function output_analysis {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
 	# Determine the type of the output file
 	echo -e "${INFOCOLOR}Analysiere OUTPUT${NOCOLOR}"
-	OUTPUT_FILE_TYPE=$(execute_command "file -b ${OUTPUT}")
-	
+	OUTPUT_FILE_TYPE=$(execute_command "file -b \"${OUTPUT}\"")
+
 	# Use the appropriate command to calculate the size of the output file
 	echo "\$OUTPUT_FILE_TYPE: ${OUTPUT_FILE_TYPE}"
 	if [[ "${OUTPUT_FILE_TYPE}" == "block special"* ]]; then
-		OUTPUT_SIZE=$(execute_command "blockdev --getsize64 ${OUTPUT}")
+		OUTPUT_SIZE=$(execute_command "blockdev --getsize64 \"${OUTPUT}\"")
 		echo "\$OUTPUT_SIZE = $OUTPUT_SIZE"
 	else
-		OUTPUT_SIZE=$(execute_command "stat -c %s ${OUTPUT}")
+		OUTPUT_SIZE=$(execute_command "stat -c %s \"${OUTPUT}\"")
 		echo "\$OUTPUT_SIZE = $OUTPUT_SIZE"
 	fi
 	echo -e "${INFOCOLOR}${FUNCNAME[0]} abgeschlossen${NOCOLOR}"
