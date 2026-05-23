@@ -280,7 +280,64 @@ PATH="/tmp/fakebin:$PATH" ./ddpar.sh -i $SOURCE_FILE -o /tmp/ddpar_backup \
 Erwartung: pro Teil eine Zeile `REMOTE COMMAND: nc -N -l <PORT> | dd of=…-N.part`
 mit aufsteigenden Ports sowie lokal `dd if=… | nc localhost <PORT> &`.
 
-### 4.8 Remote Restore – nicht implementiert 🛑
+### 4.8 Remote Restore – Block Device, unkomprimiert (Modus n)
+
+Die Backup-Teile liegen auf dem `$REMOTE_HOST`; das Zielgerät `-o` ist **lokal**.
+Der Remote-Host sendet die Teile per Netcat, lokal werden sie empfangen und
+geschrieben. Nur unkomprimiert (komprimierte Backups werden remote abgelehnt).
+Der `-i`-Basispfad ist der Pfad **auf dem Remote-Host** ohne abschließendes `-`.
+
+```bash
+sudo ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/sdb -o $DEST_DEV -r n -R $REMOTE_HOST
+```
+
+> **Voraussetzung:** Ein vorher erstelltes Remote-Backup aus Test 4.6.
+> Die Metadaten werden automatisch vom `$REMOTE_HOST` gelesen.
+
+### 4.9 Remote Restore – Datei, unkomprimiert (Modus n)
+
+```bash
+./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/ddpar_test.img -o $DEST_DIR/ddpar_test.img -r n -R $REMOTE_HOST
+```
+
+> **Voraussetzung:** Ein vorher erstelltes Remote-Backup aus Test 4.7.
+
+#### Test ohne echten Remote-Host (Fake-`ssh`-Stub)
+
+Wie bei Test 4.6/4.7 lässt sich auch der Remote-Restore-Codepfad ohne SSH-Server
+mit einem `ssh`-Stub im `PATH` validieren. Der Stub muss zusätzlich beim
+`cat …metadata.txt` gültige Metadaten liefern:
+
+```bash
+mkdir -p /tmp/fakebin
+cat > /tmp/fakebin/ssh <<'STUB'
+#!/bin/bash
+args="$*"
+case "$args" in
+  *"-O check"*) exit 1;;
+  *"-O exit"*)  exit 0;;
+esac
+cmd="${@: -1}"
+case "$cmd" in
+  *metadata.txt*)
+    printf 'NUM_JOBS=4\nFILE_NAME=in.img\nBLOCKSIZEBYTES=1048576\nINPUT_SIZE=4194304\nINPUT_FILE_NAME=in.img\nFILE_TYPE=data\nSPLIT_SIZE=1048576\n'
+    exit 0;;
+  *"ss -tuln"*) exit 0;;   # Sender-Listener läuft
+  *"ss -tln"*)  exit 1;;   # Port frei
+  *"nohup"*)    exit 0;;   # Remote-Sender im Hintergrund
+  *true)        exit 0;;
+  *) exit 0;;
+esac
+STUB
+chmod +x /tmp/fakebin/ssh
+
+echo "y" | PATH="/tmp/fakebin:$PATH" ./ddpar-restore.sh \
+  -i /tmp/ddpar_backup/in.img -o /tmp/restore_out.img -r n -R localhost
+```
+
+Erwartung: pro Teil `REMOTE COMMAND: dd if=…-N.part … | nc -N -l <PORT>` (Remote
+sendet) und lokal `nc localhost <PORT> | dd of=… seek=N count=1` mit aufsteigenden
+Ports und Offsets.
 
 Remote Restore über `ddpar-restore.sh` ist laut Status-Tabelle noch nicht implementiert.
 

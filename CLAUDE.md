@@ -55,7 +55,7 @@ Manuelle Tests: siehe `TESTING.md`.
 
 ## Bekannte Einschränkungen / offene Baustellen
 
-- Remote Backup und Remote Restore sind noch nicht implementiert (🛑 in README)
+- Remote Backup und Remote Restore (netcat, unkomprimiert, ohne Check) sind implementiert; komprimierter Remote-Transfer fehlt noch (🛑 in README)
 - Clone-Check (`ddpar-check.sh` nach Clone) ist noch nicht implementiert
 - `RANDOM` in Bash liefert nur 0–32767 → Remote-Ports werden aus dem Bereich 10000–42767 gewählt
 - `fallocate` funktioniert nicht auf Block-Devices (wird korrekt übersprungen)
