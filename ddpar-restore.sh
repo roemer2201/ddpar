@@ -39,6 +39,10 @@ function restore_split_image {
 #  done
 
   echo "Starte die Prozesse ..."
+  if [[ ${OUTPUT_FILE_TYPE} != "block special"* ]]; then
+    echo "fallocate -l ${INPUT_SIZE} $OUTPUT_FILE"
+    fallocate -l ${INPUT_SIZE} $OUTPUT_FILE
+  fi
   for ((PART_NUM=0; PART_NUM<${NUM_JOBS}; PART_NUM++)); do
     # Build individual subcommands and concatinate, if enabled
     if [ ! -z "$COMPRESSION" ]; then
@@ -56,11 +60,6 @@ function restore_split_image {
     FULL_CMD="${INPUT_CMD}"
     OUTPUT_CMD="dd of=${OUTPUT_FILE} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / ${BLOCKSIZEBYTES})) seek=$((START / ${BLOCKSIZEBYTES})) iflag=fullblock"
     FULL_CMD="${FULL_CMD} | $OUTPUT_CMD &"
-    if [[ ${OUTPUT_FILE_TYPE} != "block special"* ]]; then
-      #touch $OUTPUT_FILE
-      echo "fallocate -l ${INPUT_SIZE} $OUTPUT_FILE"
-      fallocate -l ${INPUT_SIZE} $OUTPUT_FILE
-    fi
     echo "$FULL_CMD"
     eval "${FULL_CMD}"
   done
@@ -83,12 +82,12 @@ if [ ! -e "$METADATA_FILE" ]; then
   exit 1
 fi
 NUM_JOBS=$(grep "NUM_JOBS" $METADATA_FILE | cut -d "=" -f 2)
-FILE_NAME=$(grep "FILE_NAME" $METADATA_FILE | cut -d "=" -f 2)
+FILE_NAME=$(grep "^FILE_NAME=" $METADATA_FILE | cut -d "=" -f 2)
 SPLIT_SIZE=$(grep "SPLIT_SIZE" $METADATA_FILE | cut -d "=" -f 2)
 INPUT_SIZE=$(grep "INPUT_SIZE" $METADATA_FILE | cut -d "=" -f 2)
 INPUT_FILE_TYPE=$(grep "FILE_TYPE" $METADATA_FILE | cut -d "=" -f 2)
 BLOCKSIZEBYTES=$(grep "BLOCKSIZEBYTES" $METADATA_FILE | cut -d "=" -f 2)
-COMPRESSION=$(grep "COMPRESSION" $METADATA_FILE | cut -d "=" -f 2)
+COMPRESSION=$(grep "^COMPRESSION=" $METADATA_FILE | cut -d "=" -f 2)
 COMPRESSION_LEVEL=$(grep "COMPRESSION_LEVEL" $METADATA_FILE | cut -d "=" -f 2)
 
 # Überprüfung der erforderlichen Parameter

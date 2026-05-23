@@ -306,17 +306,17 @@ function input_analysis {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
   # Determine the type of the input file
   echo -e "${INFOCOLOR}Analysiere INPUT${NOCOLOR}"
-  INPUT_FILE_TYPE=$(file -b ${INPUT})
+  INPUT_FILE_TYPE=$(file -b "${INPUT}")
   echo "\$INPUT_FILE_TYPE = $INPUT_FILE_TYPE"
-  
+
   # Use the appropriate command to calculate the size of the input file
   if [[ "${INPUT_FILE_TYPE}" == "block special"* ]]; then
     #echo "INPUT_SIZE=$(blockdev --getsize64 $INPUT)"
-    INPUT_SIZE=$(blockdev --getsize64 ${INPUT})
-    echo "\$INPUT_SIZE=${INPUT_SIZE=}"
+    INPUT_SIZE=$(blockdev --getsize64 "${INPUT}")
+    echo "\$INPUT_SIZE=${INPUT_SIZE}"
   else
-    INPUT_SIZE=$(stat -c %s ${INPUT})
-    echo "\$INPUT_SIZE=${INPUT_SIZE=}"
+    INPUT_SIZE=$(stat -c %s "${INPUT}")
+    echo "\$INPUT_SIZE=${INPUT_SIZE}"
   fi
 }
 
@@ -324,15 +324,15 @@ function output_analysis {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
 	# Determine the type of the output file
 	echo -e "${INFOCOLOR}Analysiere OUTPUT${NOCOLOR}"
-	OUTPUT_FILE_TYPE=$(execute_command "file -b ${OUTPUT}")
-	
+	OUTPUT_FILE_TYPE=$(execute_command "file -b \"${OUTPUT}\"")
+
 	# Use the appropriate command to calculate the size of the output file
 	echo "\$OUTPUT_FILE_TYPE: ${OUTPUT_FILE_TYPE}"
 	if [[ "${OUTPUT_FILE_TYPE}" == "block special"* ]]; then
-		OUTPUT_SIZE=$(execute_command "blockdev --getsize64 ${OUTPUT}")
+		OUTPUT_SIZE=$(execute_command "blockdev --getsize64 \"${OUTPUT}\"")
 		echo "\$OUTPUT_SIZE = $OUTPUT_SIZE"
 	else
-		OUTPUT_SIZE=$(execute_command "stat -c %s ${OUTPUT}")
+		OUTPUT_SIZE=$(execute_command "stat -c %s \"${OUTPUT}\"")
 		echo "\$OUTPUT_SIZE = $OUTPUT_SIZE"
 	fi
 	echo -e "${INFOCOLOR}${FUNCNAME[0]} abgeschlossen${NOCOLOR}"
@@ -340,15 +340,13 @@ function output_analysis {
 
 function remote_port_generation {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    # Generiere eine Zufallszahl zwischen 0 und 45000
-    REMOTE_PORT=$(( RANDOM % 55001 ))
-    # Füge 10000 hinzu, um den Bereich auf 10000 bis 55000 zu erweitern und addiere zusätzlich
-    REMOTE_PORT=$(( REMOTE_PORT + 10000 ))
+    # RANDOM yields 0-32767, so the effective port range is 10000-42767
+    REMOTE_PORT=$(( RANDOM + 10000 ))
 }
 
 function check_remote_port_availability {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    execute_remote_command "ss -tln | grep -q \":${CURRENT_REMOTE_PORT}\""
+    execute_remote_command "ss -tln | grep -qE \":${CURRENT_REMOTE_PORT}[^0-9]\""
     # Port is free, if exit code is not zero
     if [[ $? != 0 ]]; then
         return 0
@@ -374,7 +372,7 @@ function size_calculation {
       for ((i=${NUM_JOBS}; i<$((${NUM_JOBS}**2)); i++)); do
         if [ $((INPUT_SIZE % i)) -eq 0 ] && [ $(( $((INPUT_SIZE / i)) % BLOCKSIZEBYTES)) -eq 0 ]; then
           #echo "i=${i} - ${INPUT_SIZE}/${NUM_JOBS} = $((INPUT_SIZE % i)) - SPLIT_SIZE: $(( $((INPUT_SIZE / i)) % BLOCKSIZEBYTES))"
-          echo -e "${SUCCESSCOLOR}INFO: The next higher usable Threadnumber is $i (at same Blocksize of ${BLOCKSIZEBYTES}${}"
+          echo -e "${SUCCESSCOLOR}INFO: The next higher usable Threadnumber is $i (at same Blocksize of ${BLOCKSIZEBYTES})${NOCOLOR}"
           break
         fi
       done
@@ -515,7 +513,7 @@ function clone_file {
 				echo -e "${INFOCOLOR}Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)...${NOCOLOR}"
 				
 				# Remote-Befehl zum Prüfen, ob der Prozess auf dem Port läuft
-				if execute_remote_command "ss -tuln | grep -q :${CURRENT_REMOTE_PORT}"; then
+				if execute_remote_command "ss -tln | grep -qE :${CURRENT_REMOTE_PORT}[^0-9]"; then
 					echo -e "${INFOCOLOR}Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop.${NOCOLOR}"
 					break
 				else
@@ -629,7 +627,7 @@ function clone_block {
 				echo -e "${INFOCOLOR}Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)...${NOCOLOR}"
 				
 				# Remote-Befehl zum Prüfen, ob der Prozess auf dem Port läuft
-				if execute_remote_command "ss -tuln | grep -q :${CURRENT_REMOTE_PORT}"; then
+				if execute_remote_command "ss -tln | grep -qE :${CURRENT_REMOTE_PORT}[^0-9]"; then
 					echo -e "${INFOCOLOR}Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop.${NOCOLOR}"
 					break
 				else
@@ -864,7 +862,7 @@ case $MODE in
                 FULL_CMD="${FULL_CMD} | $OUTPUT_CMD &"
             fi
         fi
-        echo "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
+        echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
         eval "${FULL_CMD}"
         done
         
