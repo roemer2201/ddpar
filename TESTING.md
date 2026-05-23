@@ -34,6 +34,9 @@ REMOTE_DEST_DEV=/dev/sdb
 
 # Remote – Zielverzeichnis für File-Clone auf dem Remote-Host
 REMOTE_DEST_DIR=/tmp/ddpar_clone_dest
+
+# Remote – Backup-Verzeichnis auf dem Remote-Host
+REMOTE_BACKUP_DIR=/tmp/ddpar_backup
 ```
 
 ### Testdaten erstellen
@@ -219,11 +222,65 @@ Kompression findet auf der Remote-Seite statt.
 sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r c -R $REMOTE_HOST
 ```
 
-### 4.6 Remote Backup – nicht implementiert 🛑
+### 4.6 Remote Backup – Block Device, unkomprimiert (Modus n)
 
-Remote Backup (`-m backup` mit `-r`) ist laut Status-Tabelle noch nicht implementiert.
+Die Split-Teile werden per Netcat zum `$REMOTE_HOST` übertragen und dort als
+`*.part`-Dateien abgelegt. Die Übertragung ist unkomprimiert und ohne Prüfsumme
+(`-c`/`-s` werden auf dem Remote-Pfad nicht angewendet).
 
-### 4.7 Remote Restore – nicht implementiert 🛑
+```bash
+sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_BACKUP_DIR -m backup -r n -R $REMOTE_HOST
+```
+
+> **Voraussetzung:** `$REMOTE_BACKUP_DIR` muss auf dem Remote-Host als Verzeichnis
+> existieren.
+> Erzeugte Dateien auf dem Remote-Host: `$REMOTE_BACKUP_DIR/sdb-0.part` …
+> `sdb-3.part` + `sdb-metadata.txt`.
+
+### 4.7 Remote Backup – Datei, unkomprimiert (Modus n)
+
+```bash
+./ddpar.sh -i $SOURCE_FILE -o $REMOTE_BACKUP_DIR -m backup -r n -R $REMOTE_HOST
+```
+
+> Erzeugte Dateien auf dem Remote-Host:
+> `$REMOTE_BACKUP_DIR/ddpar_test.img-0.part` … + `ddpar_test.img-metadata.txt`.
+
+#### Test ohne echten Remote-Host (Fake-`ssh`-Stub)
+
+Ist kein SSH-Server verfügbar, lässt sich der Remote-Backup-Codepfad mit einem
+`ssh`-Stub im `PATH` validieren (prüft Befehlsaufbau und sequentielle Ports,
+überträgt aber keine echten Daten):
+
+```bash
+mkdir -p /tmp/fakebin
+cat > /tmp/fakebin/ssh <<'STUB'
+#!/bin/bash
+args="$*"
+case "$args" in
+  *"-O check"*) exit 1;;   # kein bestehender Socket
+  *"-O exit"*)  exit 0;;
+esac
+cmd="${@: -1}"
+case "$cmd" in
+  *"file -b"*)   echo "directory"; exit 0;;
+  *"ss -tuln"*)  exit 0;;  # Verifikationsschleife: Prozess läuft
+  *"ss -tln"*)   exit 1;;  # Portprüfung: Port frei
+  *"nohup"*)     exit 0;;  # Empfänger-Start im Hintergrund
+  *"command -v"*) exit 0;;
+  *) exit 0;;
+esac
+STUB
+chmod +x /tmp/fakebin/ssh
+
+PATH="/tmp/fakebin:$PATH" ./ddpar.sh -i $SOURCE_FILE -o /tmp/ddpar_backup \
+  -m backup -r n -R localhost -j 4 -b 1048576
+```
+
+Erwartung: pro Teil eine Zeile `REMOTE COMMAND: nc -N -l <PORT> | dd of=…-N.part`
+mit aufsteigenden Ports sowie lokal `dd if=… | nc localhost <PORT> &`.
+
+### 4.8 Remote Restore – nicht implementiert 🛑
 
 Remote Restore über `ddpar-restore.sh` ist laut Status-Tabelle noch nicht implementiert.
 
