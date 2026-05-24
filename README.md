@@ -43,8 +43,8 @@ Attempting scripted parallel dd execution.
 #### uncompressed 
 | | clone (check) | | backup (check) | restore (check) |
 |-|----------|-|----------|----------|
-| block dev | :heavy_check_mark: (:stop_sign:) | | :heavy_check_mark: (:stop_sign:) | :heavy_check_mark: (:stop_sign:) |
-| file | :heavy_check_mark: (:stop_sign:) | | :heavy_check_mark: (:stop_sign:) | :heavy_check_mark: (:stop_sign:) |
+| block dev | :heavy_check_mark: (:heavy_check_mark:) | | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
+| file | :heavy_check_mark: (:heavy_check_mark:) | | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 
 #### local [de]compression
 | | backup gzip (check) | restore gzip (check) |

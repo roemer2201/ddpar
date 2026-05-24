@@ -339,7 +339,63 @@ Erwartung: pro Teil `REMOTE COMMAND: dd if=…-N.part … | nc -N -l <PORT>` (Re
 sendet) und lokal `nc localhost <PORT> | dd of=… seek=N count=1` mit aufsteigenden
 Ports und Offsets.
 
-Remote Restore über `ddpar-restore.sh` ist laut Status-Tabelle noch nicht implementiert.
+### 4.10 Remote Check – Quelle gegen Remote-Backup (Source ↔ Backup)
+
+> **Hinweis:** Der Remote-Check überträgt **keine** Nutzdaten über netcat – die
+> SHA256-Hashes werden je Segment lokal bzw. per SSH auf dem Remote-Host berechnet
+> und nur verglichen. Nur unkomprimierte Remote-Backups werden unterstützt; die
+> `-b`-Seite liegt auf dem Remote-Host.
+
+```bash
+./ddpar-check.sh -s $SOURCE_FILE -b $REMOTE_BACKUP_DIR/ddpar_test.img -r n -R $REMOTE_HOST
+```
+
+> **Voraussetzung:** Remote-Backup aus Test 4.6/4.7.
+> Erwartung: `Segment N: OK (<hash>)` pro Segment, sonst `MISMATCH`.
+
+### 4.11 Remote Check – Remote-Backup gegen lokales Ziel (Backup ↔ Destination)
+
+```bash
+sudo ./ddpar-check.sh -b $REMOTE_BACKUP_DIR/sdb -d $DEST_DEV -r n -R $REMOTE_HOST
+```
+
+> **Voraussetzung:** Lokaler Remote-Restore aus Test 4.8 nach `$DEST_DEV`.
+
+### 4.12 Remote Check – Clone (Source ↔ Remote-Destination)
+
+Für einen Remote-Clone (Test 4.1/4.2): das geklonte Ziel liegt auf dem Remote-Host.
+
+```bash
+sudo ./ddpar-check.sh -s $SOURCE_DEV -d $REMOTE_DEST_DEV -r n -R $REMOTE_HOST -j 4 -B 1048576
+```
+
+> **Abweichung:** Ohne `-b` gibt es keine Metadaten; `-j`/`-B` müssen zum
+> ursprünglichen Clone-Aufruf passen.
+
+#### Test ohne echten Remote-Host (Fake-`ssh`-Stub)
+
+Da der Check nur Hashes vergleicht, kann ein `ssh`-Stub das Remote-Kommando lokal
+ausführen (Remote == localhost), wodurch echte Hashes über reale Dateien berechnet
+werden:
+
+```bash
+mkdir -p /tmp/fakebin
+cat > /tmp/fakebin/ssh <<'STUB'
+#!/bin/bash
+args="$*"
+case "$args" in
+  *"-O check"*) exit 1;;
+  *"-O exit"*)  exit 0;;
+esac
+cmd="${@: -1}"   # Remote-Kommando lokal ausführen
+bash -c "$cmd"
+STUB
+chmod +x /tmp/fakebin/ssh
+
+# Backup-Check gegen ein lokal erzeugtes "Remote"-Backup
+PATH="/tmp/fakebin:$PATH" ./ddpar-check.sh \
+  -s /tmp/ddpartest/in.img -b /tmp/ddpar_backup/in.img -r n -R localhost
+```
 
 ---
 
