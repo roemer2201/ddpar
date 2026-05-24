@@ -1,0 +1,37 @@
+services:
+  source:
+    build: .
+    image: ddpar-test
+    container_name: ddpar-source
+    hostname: source
+    environment:
+      DDPAR_ROLE: source
+      TEST_SIZE_MB: ${TEST_SIZE_MB:-64}
+      ROOT_PASSWORD: ${ROOT_PASSWORD:-ddpar}
+    volumes:
+      # Die ddpar-Skripte aus dem Repo-Root read-only einbinden
+      - ../:/opt/ddpar:ro
+    working_dir: /opt/ddpar
+    networks:
+      - ddpar
+    # Fuer optionale Block-Device-Tests (losetup) entkommentieren:
+    # privileged: true
+
+  target:
+    build: .
+    image: ddpar-test
+    container_name: ddpar-target
+    hostname: target
+    environment:
+      DDPAR_ROLE: target
+      ROOT_PASSWORD: ${ROOT_PASSWORD:-ddpar}
+    volumes:
+      - ../:/opt/ddpar:ro
+    working_dir: /opt/ddpar
+    networks:
+      - ddpar
+    # privileged: true
+
+networks:
+  ddpar:
+    driver: bridge
