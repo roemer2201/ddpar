@@ -17,11 +17,15 @@ make install-deps        # shellcheck, bats, netcat-openbsd (Debian/Ubuntu)
 ## Ausführen
 
 ```sh
-make test        # bats-Testsuite
-make lint        # ShellCheck, voller Report (alle Schweregrade)
-make lint-gate   # ShellCheck, nur build-relevante Fehler (CI-Gate)
-make check       # lint-gate + test (alles, was die CI prüft)
+make test              # bats-Testsuite (Integrationstests skippen ohne root/SSH)
+make test-integration  # nur Blockgerät- + Remote-Tests (root bzw. SSH nötig)
+make lint              # ShellCheck, voller Report (alle Schweregrade)
+make lint-gate         # ShellCheck, nur build-relevante Fehler (CI-Gate)
+make check             # lint-gate + test (was der schnelle CI-Job prüft)
 ```
+
+Tests, deren Voraussetzungen fehlen, werden automatisch übersprungen (`skip`),
+sodass `make test` auch ohne root/SSH grün bleibt.
 
 ## Inhalt
 
@@ -31,13 +35,28 @@ make check       # lint-gate + test (alles, was die CI prüft)
   `backup` → `check` → `restore`, Vergleich Original vs. Wiederhergestellt,
   jeweils komprimiert und unkomprimiert, plus eine Negativ-Probe (manipuliertes
   Backup wird von `check` als `FAILED` erkannt).
-- `helpers.bash` – gemeinsames `setup`/`teardown` (isoliertes Temp-Verzeichnis)
-  und `make_testfile`.
+- `blockdev.bats` – **Blockgeräte** über Loop-Devices (`losetup`, benötigt root):
+  lokaler Clone Gerät→Gerät, Backup→Restore Gerät und `check` gegen die Quelle.
+  Ohne root werden die Tests übersprungen.
+- `remote.bats` – **Remote** über SSH+netcat (Modus `n`, unkomprimiert), Testhost
+  standardmäßig `localhost` (über `DDPAR_REMOTE_TEST_HOST` überschreibbar):
+  Remote-Clone (Datei) sowie Remote-Backup→Remote-Restore (Datei). Ohne
+  passwortlose SSH-Verbindung werden die Tests übersprungen.
+- `helpers.bash` – gemeinsames `setup`/`teardown` (isoliertes Temp-Verzeichnis,
+  automatisches Lösen von Loop-Devices/SSH-Socket) sowie `make_testfile`,
+  `loop_setup`, `require_block_support`, `require_remote_support`.
 
-## Nicht hier abgedeckt (siehe Docker-Harness / TESTING.md)
+### CI
 
-- Klonen/Wiederherstellen auf echte **Blockgeräte** (Loop-Devices via `losetup`,
-  benötigt Root-Rechte).
-- **Remote**-Pfade über SSH/netcat (zwei-Host-Setup via `testing-docker/`).
+Der schnelle `test`-Job (`make test`) läuft unprivilegiert; Blockgerät- und
+Remote-Tests skippen dort. Ein dedizierter `integration`-Job richtet
+SSH-zu-localhost ein und führt `tests/blockdev.bats` + `tests/remote.bats` als
+root aus (siehe `.github/workflows/ci.yml`).
+
+## Nicht hier abgedeckt
+
+- Remote-Pfade mit **echtem Zwei-Host-Setup** und Kompression/Modi `l`/`c` – dafür
+  das Docker-Harness unter [`../testing-docker/`](../testing-docker/) und die
+  Szenarien in [`../TESTING.md`](../TESTING.md).
 - Unit-Tests einzelner Funktionen (z. B. `size_calculation`); dafür müsste der
   Hauptteil der Skripte sourcebar gekapselt werden.

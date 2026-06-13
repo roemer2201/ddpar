@@ -4,15 +4,28 @@
 
 ### Hinzugefügt
 - Automatisierte Testpipeline: GitHub-Actions-Workflow (`.github/workflows/ci.yml`)
-  mit ShellCheck-Lint (Gate bei `severity=error`, voller Report informativ) und
-  bats-Testsuite
-- bats-Tests unter `tests/`: CLI-Verhalten (`cli.bats`) sowie Datei-basierter
-  `backup → check → restore`-Roundtrip inkl. komprimiert und Negativ-Probe
-  (`roundtrip.bats`)
-- `Makefile`-Targets `test`, `lint-gate` und `check`
+  mit ShellCheck-Lint (Gate bei `severity=error`, voller Report informativ),
+  schnellem bats-Job (CLI + Datei-Roundtrip) und einem Integration-Job
+  (Blockgeräte + Remote, mit SSH-zu-localhost-Setup)
+- bats-Tests unter `tests/`:
+  - `cli.bats` – CLI-Verhalten
+  - `roundtrip.bats` – Datei-basierter `backup → check → restore`-Roundtrip
+    inkl. komprimiert und Negativ-Probe
+  - `blockdev.bats` – Blockgerät-Clone/Backup/Restore/Check über Loop-Devices
+    (`losetup`, root; skippt sonst)
+  - `remote.bats` – Remote-Clone/Backup/Restore über SSH+netcat (Modus `n`,
+    Testhost via `DDPAR_REMOTE_TEST_HOST`, default `localhost`; skippt ohne SSH)
+- `Makefile`-Targets `test`, `test-integration`, `lint-gate` und `check`
 - **ddpar-restore.sh:** Flag `-y` zum Überspringen der interaktiven
   Sicherheitsabfrage (ermöglicht nicht-interaktive/automatisierte Restores;
   Verhalten ohne Flag unverändert)
+
+### Behoben
+- **ddpar.sh:** Lokaler Blockgerät-Clone scheiterte, weil `execute_command` den
+  Befehl lokal unquotiert (`${command}`) ausführte und so die in
+  `output_analysis` enthaltenen Quotes (`file -b "${OUTPUT}"`) literal an `file`
+  weitergab → Typ-Erkennung des Zielgeräts schlug fehl. Lokale Ausführung nutzt
+  nun `eval "${command}"` (analog zur Remote-Seite und zu `eval "${FULL_CMD}"`)
 
 ## [Unreleased] – branch claude/review-ddpar-bugs-bc3la
 

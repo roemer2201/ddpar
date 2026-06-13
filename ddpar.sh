@@ -217,8 +217,12 @@ function execute_command {
 		# Führe den Befehl auf dem Remote-System aus (via SSH)
 		ssh -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "${command}"
 	else
-		# Führe den Befehl lokal aus
-		${command}
+		# Führe den Befehl lokal aus. eval (statt ${command}) entfernt die
+		# in den Befehlsstrings enthaltenen Quotes korrekt, analog zur
+		# Remote-Seite, wo die SSH-Shell den String neu parst. Ohne eval
+		# erhielte z.B. "file -b \"${OUTPUT}\"" die Quotes literal, wodurch
+		# die Typ-Erkennung eines lokalen Blockgeräts fehlschlägt.
+		eval "${command}"
 	fi
 }
 

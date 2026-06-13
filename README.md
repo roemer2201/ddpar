@@ -92,14 +92,17 @@ Attempting scripted parallel dd execution.
 ## Testing
 
 Eine automatisierte Pipeline (GitHub Actions: ShellCheck + bats) läuft bei jedem
-Push und Pull Request. Lokal:
+Push und Pull Request. Sie umfasst CLI- und Datei-Roundtrip-Tests sowie einen
+Integration-Job mit Blockgerät- (Loop-Devices) und Remote-Tests (SSH+netcat).
+Lokal:
 
 ```sh
-make install-deps   # shellcheck, bats, netcat-openbsd
-make check          # lint-gate + Testsuite
+make install-deps        # shellcheck, bats, netcat-openbsd
+make check               # lint-gate + Testsuite (Integrationstests skippen ohne root/SSH)
+make test-integration    # Blockgerät- + Remote-Tests (root bzw. SSH zu Testhost nötig)
 ```
 
-Für szenariobasierte/manuelle Tests (Blockgeräte, Remote SSH/netcat) siehe
+Für szenariobasierte/manuelle Tests (echtes Zwei-Host-Remote, Kompression) siehe
 [`TESTING.md`](TESTING.md) und das Docker-Harness unter
 [`testing-docker/`](testing-docker/). Details zur bats-Suite in
 [`tests/README.md`](tests/README.md).

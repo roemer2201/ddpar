@@ -2,12 +2,14 @@
 
 Dieses Dokument enthält Beispiel-Kommandos zum manuellen Testen aller implementierten Funktionen von ddpar.
 
-> **Automatisierte Tests:** Für den schnellen, automatisierten Kernablauf (CLI-Verhalten
-> und Datei-basierter `backup → check → restore`-Roundtrip) gibt es eine bats-Suite unter
-> [`tests/`](tests/), die zusammen mit ShellCheck in der CI läuft
-> (`.github/workflows/ci.yml`). Lokal: `make check`. Details in [`tests/README.md`](tests/README.md).
-> Die hier dokumentierten Szenarien (Blockgeräte, Remote SSH/netcat) ergänzen das über
-> das Docker-Harness unter [`testing-docker/`](testing-docker/).
+> **Automatisierte Tests:** Es gibt eine bats-Suite unter [`tests/`](tests/), die
+> zusammen mit ShellCheck in der CI läuft (`.github/workflows/ci.yml`):
+> CLI-Verhalten und Datei-`backup → check → restore`-Roundtrip (schneller Job) sowie
+> Blockgerät- (Loop-Devices) und Remote-Tests (SSH+netcat, Modus `n`) im
+> Integration-Job. Lokal: `make check` bzw. `make test-integration` (root/SSH nötig).
+> Details in [`tests/README.md`](tests/README.md). Die hier dokumentierten Szenarien
+> (echtes Zwei-Host-Remote, Kompression, Modi `l`/`c`) ergänzen das über das
+> Docker-Harness unter [`testing-docker/`](testing-docker/).
 
 ---
 
