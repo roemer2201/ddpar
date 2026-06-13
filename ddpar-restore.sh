@@ -8,6 +8,7 @@ REMOTE=0
 REMOTE_HOST=""
 SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
 DEBUG=0
+ASSUME_YES=0
 
 # Hilfemeldung anzeigen
 function show_help {
@@ -20,16 +21,18 @@ function show_help {
   echo "-o, --output PATH       Vollständiger Pfad des (lokalen) Zielgeräts"
   echo "-r [n]                  Remote-Restore über SSH+Netcat (nur unkomprimiert)"
   echo "-R user@host            Angabe des Remote-Host, auf dem das Backup liegt"
+  echo "-y                      Sicherheitsabfrage überspringen (assume yes)"
   echo "-h, --help              Diese Hilfe anzeigen"
   echo ""
   echo "Die Anzahl der Jobs und Blockgröße kann nicht geändert werden. Sie wird beim Erstellen des Abbildes festgelegt."
 }
 
 # Verwendung von getopts zur Verarbeitung der Optionen
-while getopts ":i:o:r::R:h" opt; do
+while getopts ":i:o:r::R:yh" opt; do
   case $opt in
     i|-input) INPUT="$OPTARG";;
     o|-output) OUTPUT="$OPTARG";;
+    y) ASSUME_YES=1;;
     r)
       REMOTE=1
       if [[ ${OPTARG} =~ ^[lnc]+$ ]]; then
@@ -350,28 +353,33 @@ else
 fi
 
 echo "Nachfolgend werden die geteilten Dateien unter $INPUT_PATH/$INPUT_FILE_BASENAME nach $OUTPUT_FILE geschrieben."
-while true; do
-  read -p "Möchten Sie fortfahren [y/N]? " choice
-  case "$choice" in
-    y|Y)
-      echo "Beginning to restore ..."
-      restore_split_image
-      break
-      ;;
-    n|N|"")
-      echo "Abbruch."
-      # Fügen Sie hier den Code hinzu, der bei "Nein" ausgeführt werden soll
-      if [ $REMOTE -eq 1 ]; then
-        rm -f "$METADATA_SRC"
-        close_ssh_connection
-      fi
-      exit 0
-      ;;
-    *)
-      echo "Ungültige Eingabe. Bitte wählen Sie 'y' oder 'N'."
-      ;;
-  esac
-done
+if [ "$ASSUME_YES" -eq 1 ]; then
+  echo "Sicherheitsabfrage übersprungen (-y). Beginning to restore ..."
+  restore_split_image
+else
+  while true; do
+    read -p "Möchten Sie fortfahren [y/N]? " choice
+    case "$choice" in
+      y|Y)
+        echo "Beginning to restore ..."
+        restore_split_image
+        break
+        ;;
+      n|N|"")
+        echo "Abbruch."
+        # Fügen Sie hier den Code hinzu, der bei "Nein" ausgeführt werden soll
+        if [ $REMOTE -eq 1 ]; then
+          rm -f "$METADATA_SRC"
+          close_ssh_connection
+        fi
+        exit 0
+        ;;
+      *)
+        echo "Ungültige Eingabe. Bitte wählen Sie 'y' oder 'N'."
+        ;;
+    esac
+  done
+fi
 
 #if [[ "$INPUT_FILE_TYPE" == "block special"* ]] && [[ "$OUTPUT_FILE_TYPE" == "block special"* ]]; then
 #  echo "Beginning to restore ..."

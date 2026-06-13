@@ -1,6 +1,13 @@
 # TESTING
 
-Dieses Dokument enthält Beispiel-Kommandos zum Testen aller implementierten Funktionen von ddpar.
+Dieses Dokument enthält Beispiel-Kommandos zum manuellen Testen aller implementierten Funktionen von ddpar.
+
+> **Automatisierte Tests:** Für den schnellen, automatisierten Kernablauf (CLI-Verhalten
+> und Datei-basierter `backup → check → restore`-Roundtrip) gibt es eine bats-Suite unter
+> [`tests/`](tests/), die zusammen mit ShellCheck in der CI läuft
+> (`.github/workflows/ci.yml`). Lokal: `make check`. Details in [`tests/README.md`](tests/README.md).
+> Die hier dokumentierten Szenarien (Blockgeräte, Remote SSH/netcat) ergänzen das über
+> das Docker-Harness unter [`testing-docker/`](testing-docker/).
 
 ---
 

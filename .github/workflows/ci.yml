@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # Vollständiger Report (alle Schweregrade) – rein informativ, bricht den
+      # Build nicht ab. Nützlich, um die Code-Qualität schrittweise zu verbessern.
+      - name: ShellCheck report (informativ)
+        run: make lint || true
+
+      # Build-relevante Prüfung: nur echte Fehler lassen die CI scheitern.
+      - name: ShellCheck gate (severity=error)
+        run: make lint-gate
+
+  test:
+    name: bats
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y bats netcat-openbsd
+
+      - name: Run test suite
+        run: make test

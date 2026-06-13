@@ -89,6 +89,21 @@ Attempting scripted parallel dd execution.
 | file | :stop_sign: (:stop_sign:) |
 -->
 
+## Testing
+
+Eine automatisierte Pipeline (GitHub Actions: ShellCheck + bats) läuft bei jedem
+Push und Pull Request. Lokal:
+
+```sh
+make install-deps   # shellcheck, bats, netcat-openbsd
+make check          # lint-gate + Testsuite
+```
+
+Für szenariobasierte/manuelle Tests (Blockgeräte, Remote SSH/netcat) siehe
+[`TESTING.md`](TESTING.md) und das Docker-Harness unter
+[`testing-docker/`](testing-docker/). Details zur bats-Suite in
+[`tests/README.md`](tests/README.md).
+
 ## To Do
 - check read/write permissions for $SOURCE, $BACKUP_BASE and $DESTINATION
 - ddpar.sh:

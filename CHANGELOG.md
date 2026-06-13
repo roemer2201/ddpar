@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased] – branch claude/great-cori-29qjug (auf testing-docker aufbauend)
+
+### Hinzugefügt
+- Automatisierte Testpipeline: GitHub-Actions-Workflow (`.github/workflows/ci.yml`)
+  mit ShellCheck-Lint (Gate bei `severity=error`, voller Report informativ) und
+  bats-Testsuite
+- bats-Tests unter `tests/`: CLI-Verhalten (`cli.bats`) sowie Datei-basierter
+  `backup → check → restore`-Roundtrip inkl. komprimiert und Negativ-Probe
+  (`roundtrip.bats`)
+- `Makefile`-Targets `test`, `lint-gate` und `check`
+- **ddpar-restore.sh:** Flag `-y` zum Überspringen der interaktiven
+  Sicherheitsabfrage (ermöglicht nicht-interaktive/automatisierte Restores;
+  Verhalten ohne Flag unverändert)
+
 ## [Unreleased] – branch claude/review-ddpar-bugs-bc3la
 
 ### Hinzugefügt
