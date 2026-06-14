@@ -16,6 +16,10 @@
   - `remote.bats` – Remote-Clone/Backup/Restore über SSH+netcat (Modus `n`,
     Testhost via `DDPAR_REMOTE_TEST_HOST`, default `localhost`; skippt ohne SSH)
 - `Makefile`-Targets `test`, `test-integration`, `lint-gate` und `check`
+- `testing-docker/run-remote-tests.sh`: manuelles Orchestrierungs-Skript, das die
+  zwei Container startet, die Remote-Szenarien (Clone/Backup/Restore/Check über
+  SSH+netcat) `source` → `target` durchführt, die Integrität per SHA256 prüft und
+  einen Exitcode liefert (nicht Teil der CI)
 - **ddpar-restore.sh:** Flag `-y` zum Überspringen der interaktiven
   Sicherheitsabfrage (ermöglicht nicht-interaktive/automatisierte Restores;
   Verhalten ohne Flag unverändert)

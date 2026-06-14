@@ -71,7 +71,33 @@ Verfügbare Pfade in den Containern:
 
 ---
 
-## Testszenarien
+## Automatisierter Remote-Test (`run-remote-tests.sh`)
+
+Für einen schnellen End-to-End-Check nach Code-Änderungen gibt es ein
+Orchestrierungs-Skript, das die Container startet, die Remote-Szenarien
+`source` → `target` durchführt und die Integrität per SHA256 prüft:
+
+```bash
+cd testing-docker
+./run-remote-tests.sh              # baut Image, startet Container, testet, räumt auf
+./run-remote-tests.sh --no-build   # ohne Rebuild (Skripte sind read-only gemountet)
+./run-remote-tests.sh --keep       # Container nach dem Lauf zum Nachsehen laufen lassen
+```
+
+Geprüft werden (alles über SSH + netcat, Modus `n`, unkomprimiert):
+
+1. **Remote-Clone** (Datei) `source` → `target`, Vergleich Original ↔ Klon
+2. **Remote-Backup** `source` → `target` und anschließendes **Remote-Restore**
+   `target` → `source`, Vergleich Original ↔ Wiederhergestellt
+3. **Remote-Check** (lokale Quelle ↔ Remote-Backup)
+
+Exitcode `0` = alle Szenarien bestanden, `1` = mindestens ein Fehler. Das Skript
+ist ein **manuelles** Werkzeug und nicht Teil der GitHub-Actions-CI (die den
+Remote-Pfad gegen `localhost` testet, siehe [`../tests/`](../tests/)).
+
+---
+
+## Testszenarien (manuell)
 
 Alle Kommandos werden **im `source`-Container** ausgeführt
 (`docker compose exec source bash`). Der Remote-Host ist `root@target`.

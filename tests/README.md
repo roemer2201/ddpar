@@ -56,7 +56,8 @@ root aus (siehe `.github/workflows/ci.yml`).
 ## Nicht hier abgedeckt
 
 - Remote-Pfade mit **echtem Zwei-Host-Setup** und Kompression/Modi `l`/`c` – dafür
-  das Docker-Harness unter [`../testing-docker/`](../testing-docker/) und die
-  Szenarien in [`../TESTING.md`](../TESTING.md).
+  das Docker-Harness unter [`../testing-docker/`](../testing-docker/) (inkl.
+  `run-remote-tests.sh` für einen automatisierten Zwei-Container-Durchlauf) und
+  die Szenarien in [`../TESTING.md`](../TESTING.md).
 - Unit-Tests einzelner Funktionen (z. B. `size_calculation`); dafür müsste der
   Hauptteil der Skripte sourcebar gekapselt werden.
