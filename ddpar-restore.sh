@@ -199,7 +199,7 @@ function remote_restore_commands {
     return 1
   fi
 
-  OUTPUT_CMD_REMOTE_SOURCE="nc -N ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}"
+  OUTPUT_CMD_REMOTE_SOURCE="nc -N ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null"
 }
 
 function restore_split_image {
