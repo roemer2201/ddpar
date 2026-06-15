@@ -59,7 +59,7 @@ require_block_support() {
 # Aufruf: dev=$(loop_setup <backing-datei> [mebibytes])
 loop_setup() {
   local img="$1"
-  local mib="${2:-8}"
+  local mib="${2:-128}"
   dd if=/dev/zero of="$img" bs=1M count="$mib" status=none
   local dev
   dev="$(losetup --find --show "$img")"

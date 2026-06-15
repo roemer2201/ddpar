@@ -12,10 +12,11 @@
 # Skriptänderungen also nicht nötig (--no-build nutzen).
 #
 # Verwendung:
-#   ./run-remote-tests.sh [--no-build] [--keep] [-h]
+#   ./run-remote-tests.sh [--no-build] [--keep] [--verbose] [-h]
 #
 #   --no-build   Vorhandenes Image verwenden, nicht neu bauen
 #   --keep       Container nach dem Lauf nicht herunterfahren (zum Nachsehen)
+#   --verbose    ddpar-Kommando-Output live ausgeben (statt nur bei Fehler)
 #   -h, --help   Diese Hilfe anzeigen
 
 set -euo pipefail
@@ -25,11 +26,13 @@ cd "$(dirname "$SELF")"
 
 BUILD=1
 KEEP=0
+VERBOSE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-build) BUILD=0 ;;
     --keep)     KEEP=1 ;;
+    --verbose)  VERBOSE=1 ;;
     -h|--help)
       sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'
       exit 0
@@ -45,6 +48,7 @@ RC=0
 info() { echo "==> $*"; }
 pass() { echo "[PASS] $*"; }
 fail() { echo "[FAIL] $*"; RC=1; }
+vshow() { [ "$VERBOSE" -eq 1 ] && echo "$1" | sed 's/^/    /' || true; }
 
 # shellcheck disable=SC2317  # Funktionsrumpf wird via trap aufgerufen
 cleanup() {
@@ -65,7 +69,7 @@ tgt() { $DC exec -T target bash -lc "$1"; }
 
 if [ "$BUILD" -eq 1 ]; then
   info "Baue Image ..."
-  $DC build
+  $DC build source
 fi
 info "Starte Container ..."
 $DC up -d
@@ -111,6 +115,7 @@ info "Quelle: $SRC_IMG  sha256=$SRC_HASH"
 
 info "Szenario 1: Remote-Clone (Datei) source -> target"
 if out="$(src "./ddpar.sh -i $SRC_IMG -o /clone_dest -m clone -r n -R root@target" 2>&1)"; then
+  vshow "$out"
   tgt 'sync' || true
   sleep 1
   DST_HASH="$(tgt 'sha256sum /clone_dest/source.img 2>/dev/null' | awk '{print $1}')"
@@ -120,6 +125,7 @@ if out="$(src "./ddpar.sh -i $SRC_IMG -o /clone_dest -m clone -r n -R root@targe
     fail "Remote-Clone weicht ab (src=$SRC_HASH dst=${DST_HASH:-<leer>})"
   fi
 else
+  vshow "$out"
   fail "Remote-Clone-Kommando schlug fehl"
   echo "$out" | tail -15 | sed 's/^/    /'
 fi
@@ -128,6 +134,7 @@ fi
 
 info "Szenario 2: Remote-Backup (source -> target) + Remote-Restore (target -> source)"
 if out="$(src "./ddpar.sh -i $SRC_IMG -o /backup -m backup -r n -R root@target" 2>&1)"; then
+  vshow "$out"
   if tgt 'test -f /backup/source.img-0.part && test -f /backup/source.img-metadata.txt'; then
     pass "Remote-Backup: Split-Teile + Metadaten auf target vorhanden"
   else
@@ -135,6 +142,7 @@ if out="$(src "./ddpar.sh -i $SRC_IMG -o /backup -m backup -r n -R root@target" 
   fi
 
   if out2="$(src "./ddpar-restore.sh -i /backup/source.img -o /restore/source.img -r n -R root@target -y" 2>&1)"; then
+    vshow "$out2"
     sleep 1
     RES_HASH="$(src 'sha256sum /restore/source.img 2>/dev/null' | awk '{print $1}')"
     if [ -n "$RES_HASH" ] && [ "$SRC_HASH" = "$RES_HASH" ]; then
@@ -143,10 +151,12 @@ if out="$(src "./ddpar.sh -i $SRC_IMG -o /backup -m backup -r n -R root@target" 
       fail "Remote-Restore weicht ab (src=$SRC_HASH restore=${RES_HASH:-<leer>})"
     fi
   else
+    vshow "$out2"
     fail "Remote-Restore-Kommando schlug fehl"
     echo "$out2" | tail -15 | sed 's/^/    /'
   fi
 else
+  vshow "$out"
   fail "Remote-Backup-Kommando schlug fehl"
   echo "$out" | tail -15 | sed 's/^/    /'
 fi
@@ -155,6 +165,7 @@ fi
 
 info "Szenario 3: Remote-Check (Quelle <-> Remote-Backup auf target)"
 check_out="$(src "./ddpar-check.sh -s $SRC_IMG -b /backup/source.img -r n -R root@target" 2>&1 || true)"
+vshow "$check_out"
 if echo "$check_out" | grep -q "OK" && ! echo "$check_out" | grep -q "FAILED"; then
   pass "Remote-Check bestätigt Übereinstimmung"
 else
