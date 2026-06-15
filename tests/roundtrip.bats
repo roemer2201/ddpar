@@ -12,12 +12,12 @@ load helpers
   make_testfile "$TMP/quelle.bin"
   mkdir -p "$TMP/backup"
 
-  run "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -s
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -s
   [ "$status" -eq 0 ]
   [ -f "$TMP/backup/quelle.bin-0.part" ]
   [ -f "$TMP/backup/quelle.bin-metadata.txt" ]
 
-  run "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/backup/quelle.bin" -o "$TMP/restore.bin" -y
+  vrun "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/backup/quelle.bin" -o "$TMP/restore.bin" -y
   [ "$status" -eq 0 ]
 
   cmp -s "$TMP/quelle.bin" "$TMP/restore.bin"
@@ -27,11 +27,11 @@ load helpers
   make_testfile "$TMP/quelle.bin"
   mkdir -p "$TMP/backup"
 
-  run "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -c -s
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -c -s
   [ "$status" -eq 0 ]
   [ -f "$TMP/backup/quelle.bin-0.gz" ]
 
-  run "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/backup/quelle.bin" -o "$TMP/restore.bin" -y
+  vrun "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/backup/quelle.bin" -o "$TMP/restore.bin" -y
   [ "$status" -eq 0 ]
 
   cmp -s "$TMP/quelle.bin" "$TMP/restore.bin"
@@ -41,10 +41,10 @@ load helpers
   make_testfile "$TMP/quelle.bin"
   mkdir -p "$TMP/backup"
 
-  run "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -s
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -s
   [ "$status" -eq 0 ]
 
-  run "$REPO_ROOT/ddpar-check.sh" -s "$TMP/quelle.bin" -b "$TMP/backup/quelle.bin"
+  vrun "$REPO_ROOT/ddpar-check.sh" -s "$TMP/quelle.bin" -b "$TMP/backup/quelle.bin"
   [[ "$output" == *"OK"* ]]
   [[ "$output" != *"FAILED"* ]]
 }
@@ -53,12 +53,12 @@ load helpers
   make_testfile "$TMP/quelle.bin"
   mkdir -p "$TMP/backup"
 
-  run "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -s
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -s
   [ "$status" -eq 0 ]
 
   # Quelle nach dem Backup verändern -> Prüfsummen dürfen nicht mehr passen
   printf 'tampered' | dd of="$TMP/quelle.bin" bs=1 seek=0 conv=notrunc status=none
 
-  run "$REPO_ROOT/ddpar-check.sh" -s "$TMP/quelle.bin" -b "$TMP/backup/quelle.bin"
+  vrun "$REPO_ROOT/ddpar-check.sh" -s "$TMP/quelle.bin" -b "$TMP/backup/quelle.bin"
   [[ "$output" == *"FAILED"* ]]
 }

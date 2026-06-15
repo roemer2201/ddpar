@@ -1,6 +1,21 @@
 # Gemeinsame Helfer für die bats-Testsuite.
 # Wird von den .bats-Dateien via `load helpers` eingebunden.
 
+# Wrapper um bats 'run': gibt Kommando, Exit-Code und Output aus, wenn
+# DDPAR_VERBOSE=1 gesetzt ist (fd 3 = bats-Diagnosekanal, immer sichtbar).
+# Schreibt zusätzlich in DDPAR_LOG, falls die Variable auf einen Dateipfad zeigt.
+vrun() {
+  [ "${DDPAR_VERBOSE:-0}" = "1" ] && printf '# >> %s\n' "$*" >&3
+  run "$@"
+  if [ "${DDPAR_VERBOSE:-0}" = "1" ]; then
+    printf '# exit: %s\n' "$status" >&3
+    [ -n "$output" ] && printf '%s\n' "$output" | sed 's/^/#    /' >&3
+  fi
+  if [ -n "${DDPAR_LOG:-}" ]; then
+    printf 'CMD: %s\nEXIT: %s\n%s\n---\n' "$*" "$status" "$output" >> "$DDPAR_LOG"
+  fi
+}
+
 setup() {
   # Wurzel des Repos (ein Verzeichnis über tests/)
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
