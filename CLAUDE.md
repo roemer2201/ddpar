@@ -59,7 +59,7 @@ Manuelle Tests: siehe `TESTING.md`.
 - Remote Checks (`ddpar-check.sh -r`) vergleichen nur SHA256-Hashes je Segment (lokal vs. per SSH) — kein netcat-Datentransfer nötig
 - `RANDOM` in Bash liefert nur 0–32767 → Remote-Ports werden aus dem Bereich 10000–42767 gewählt
 - `fallocate` funktioniert nicht auf Block-Devices (wird korrekt übersprungen)
-- Eingabegröße muss durch `NUM_JOBS × BLOCKSIZEBYTES` ganzzahlig teilbar sein
+- Beliebige Eingabegrößen: `SPLIT_SIZE` wird auf die Blockgröße abgerundet, der letzte Teil überträgt den Rest (`part_bytes`, dd-Flags `count_bytes`/`skip_bytes`/`seek_bytes`)
 - Remote-Modus-Flags (`-r l/n/c`) sind noch nicht vollständig implementiert
 
 ## Branch-Strategie

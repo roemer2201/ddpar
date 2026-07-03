@@ -162,20 +162,34 @@ function cleanup_on_signal {
 }
 trap cleanup_on_signal INT TERM
 
+function part_bytes {
+  # Bytes, die Segment $1 umfasst: normale Segmente SPLIT_SIZE, das letzte
+  # zusätzlich den nicht gleichmäßig verteilbaren Rest; bei Eingaben kleiner
+  # als NUM_JOBS Blöcke ggf. weniger oder 0.
+  local part=$1
+  local start=$((part * SPLIT_SIZE))
+  local remaining=$((INPUT_SIZE - start))
+  if [ "${remaining}" -le 0 ]; then
+    echo 0
+  elif [ "${part}" -eq $((NUM_JOBS - 1)) ] || [ "${remaining}" -lt "${SPLIT_SIZE}" ]; then
+    echo "${remaining}"
+  else
+    echo "${SPLIT_SIZE}"
+  fi
+}
+
 function local_seg_hash {
   # $1 = Datei/Device (lokal), $2 = Segment-Index. Liefert SHA256 des Segments.
   local f=$1 idx=$2
-  local count=$((SPLIT_SIZE / BLOCKSIZEBYTES))
-  local skip=$((idx * count))
-  dd if="$f" bs="$BLOCKSIZEBYTES" count="$count" skip="$skip" status=none | sha256sum | cut -d' ' -f1
+  local start=$((idx * SPLIT_SIZE))
+  dd if="$f" bs="$BLOCKSIZEBYTES" iflag=count_bytes,skip_bytes count="$(part_bytes "$idx")" skip="$start" status=none | sha256sum | cut -d' ' -f1
 }
 
 function remote_seg_hash {
   # $1 = Datei/Device (auf Remote-Host), $2 = Segment-Index. Liefert SHA256 des Segments.
   local f=$1 idx=$2
-  local count=$((SPLIT_SIZE / BLOCKSIZEBYTES))
-  local skip=$((idx * count))
-  execute_remote_command "dd if='$f' bs=$BLOCKSIZEBYTES count=$count skip=$skip status=none | sha256sum" | cut -d' ' -f1
+  local start=$((idx * SPLIT_SIZE))
+  execute_remote_command "dd if='$f' bs=$BLOCKSIZEBYTES iflag=count_bytes,skip_bytes count=$(part_bytes "$idx") skip=$start status=none | sha256sum" | cut -d' ' -f1
 }
 
 function remote_part_hash {
@@ -201,8 +215,8 @@ function check_restored_image {
       ) &
     else
       START=$((i * SPLIT_SIZE))
-      echo "dd if=$OUTPUT_FILE bs=$BLOCKSIZEBYTES count=$((SPLIT_SIZE / $BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES)) status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &"
-      dd if=$OUTPUT_FILE bs=$BLOCKSIZEBYTES count=$((SPLIT_SIZE / $BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES)) status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &
+      echo "dd if=$OUTPUT_FILE bs=$BLOCKSIZEBYTES iflag=count_bytes,skip_bytes count=$(part_bytes "$i") skip=$START status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &"
+      dd if="$OUTPUT_FILE" bs="$BLOCKSIZEBYTES" iflag=count_bytes,skip_bytes count="$(part_bytes "$i")" skip="$START" status=none | sha256sum -c "$BASE_FILES$i.sha256" | sed "s#-#$BASE_FILES$i#" &
     fi
     register_job $! "Segment $i (restore-check)"
   done
@@ -224,8 +238,8 @@ function check_backuped_image {
       ) &
     else
       START=$((i * SPLIT_SIZE))
-      echo "dd if=$INPUT_FILE bs=$BLOCKSIZEBYTES count=$((SPLIT_SIZE / $BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES)) status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &"
-      dd if=$INPUT_FILE bs=$BLOCKSIZEBYTES count=$((SPLIT_SIZE / $BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES)) status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &
+      echo "dd if=$INPUT_FILE bs=$BLOCKSIZEBYTES iflag=count_bytes,skip_bytes count=$(part_bytes "$i") skip=$START status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &"
+      dd if="$INPUT_FILE" bs="$BLOCKSIZEBYTES" iflag=count_bytes,skip_bytes count="$(part_bytes "$i")" skip="$START" status=none | sha256sum -c "$BASE_FILES$i.sha256" | sed "s#-#$BASE_FILES$i#" &
     fi
     register_job $! "Segment $i (backup-check)"
   done
@@ -348,9 +362,12 @@ if [ ! -z "${BASE_PATH}" ]; then
   fi
   NUM_JOBS=$(grep "^NUM_JOBS=" "$META_SRC" | cut -d "=" -f 2)
   SPLIT_SIZE=$(grep "^SPLIT_SIZE=" "$META_SRC" | cut -d "=" -f 2)
+  INPUT_SIZE=$(grep "^INPUT_SIZE=" "$META_SRC" | cut -d "=" -f 2)
   BASE_FILE_TYPE=$(grep "^FILE_TYPE=" "$META_SRC" | cut -d "=" -f 2)
   BLOCKSIZEBYTES=$(grep "^BLOCKSIZEBYTES=" "$META_SRC" | cut -d "=" -f 2)
   COMPRESSION=$(grep "^COMPRESSION=" "$META_SRC" | cut -d "=" -f 2)
+  # Ältere Metadatendateien ohne INPUT_SIZE: glatte Teilung annehmen
+  [ -z "$INPUT_SIZE" ] && INPUT_SIZE=$((SPLIT_SIZE * NUM_JOBS))
   [ $REMOTE -eq 1 ] && rm -f "$META_SRC"
 
   # Remote-Check unterstützt derzeit nur unkomprimierte Backups
@@ -429,14 +446,10 @@ if [ -n "$SOURCE" ] && [ -z "$BASE_PATH" ] && [ -n "$DESTINATION" ]; then
   else
     INPUT_SIZE=$(stat -c %s "$SOURCE")
   fi
-  SPLIT_SIZE=$((INPUT_SIZE / NUM_JOBS))
-
-  # Teilbarkeit prüfen, damit kein Bereich übersprungen oder doppelt gelesen wird
-  if [ $((INPUT_SIZE % NUM_JOBS)) -ne 0 ] || [ $((SPLIT_SIZE % BLOCKSIZEBYTES)) -ne 0 ]; then
-    echo "Fehler: Quellgröße ($INPUT_SIZE) ist nicht glatt durch NUM_JOBS ($NUM_JOBS) und BLOCKSIZEBYTES ($BLOCKSIZEBYTES) teilbar."
-    echo "Bitte -j und/oder -B passend zum ursprünglichen Clone-Aufruf wählen."
-    exit 1
-  fi
+  # Gleiche Aufteilung wie beim Clone-Vorgang (ddpar.sh size_calculation):
+  # SPLIT_SIZE auf Blockgröße abgerundet, das letzte Segment prüft den Rest.
+  SPLIT_SIZE=$(( (INPUT_SIZE / (NUM_JOBS * BLOCKSIZEBYTES)) * BLOCKSIZEBYTES ))
+  [ "$SPLIT_SIZE" -eq 0 ] && SPLIT_SIZE=$BLOCKSIZEBYTES
 
   echo "Beginning to check ..."
   check_cloned_image

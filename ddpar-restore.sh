@@ -162,8 +162,8 @@ function check_remote_port_availability {
 function remote_restore_commands {
   [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
   # Startet auf dem Remote-Host einen netcat-Sender, der die übergebene Quelle
-  # (z.B. "dd if=...part") an den verbindenden lokalen Client liefert.
-  # Setzt anschließend OUTPUT_CMD_REMOTE_SOURCE für die lokale Empfängerseite.
+  # (z.B. "dd if=...part") an den verbindenden lokalen Client liefert. Der
+  # Port für die lokale Empfängerseite steht anschließend in CURRENT_REMOTE_PORT.
   local remote_input_cmd=$1
 
   if [ -z "${REMOTE_PORT}" ]; then
@@ -204,8 +204,6 @@ function remote_restore_commands {
     echo "Process did not start on port ${CURRENT_REMOTE_PORT} after $MAX_ATTEMPTS attempts."
     return 1
   fi
-
-  OUTPUT_CMD_REMOTE_SOURCE="nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null"
 }
 
 # Verwaltung der parallelen Hintergrund-Jobs:
@@ -263,54 +261,66 @@ function cleanup_on_signal {
 }
 trap cleanup_on_signal INT TERM
 
-function restore_split_image {
-#  for ((i=0; i<$NUM_JOBS; i++)); do
-#    START=$((i * SPLIT_SIZE))
-#    touch $OUTPUT_FILE
-#    echo "zcat ${INPUT_FILES}${i}.gz | dd of=$OUTPUT_FILE bs=$BLOCKSIZEBYTES seek=$((START / BLOCKSIZEBYTES)) &"
-#    zcat ${INPUT_FILES}${i}.gz | dd of=$OUTPUT_FILE bs=$BLOCKSIZEBYTES seek=$((START / BLOCKSIZEBYTES)) &
-#  done
+function part_bytes {
+  # Bytes, die Teil $1 enthält: normale Teile SPLIT_SIZE, der letzte Teil
+  # zusätzlich den nicht gleichmäßig verteilbaren Rest; bei Backups kleiner
+  # als NUM_JOBS Blöcke ggf. weniger oder 0.
+  local part=$1
+  local start=$((part * SPLIT_SIZE))
+  local remaining=$((INPUT_SIZE - start))
+  if [ "${remaining}" -le 0 ]; then
+    echo 0
+  elif [ "${part}" -eq $((NUM_JOBS - 1)) ] || [ "${remaining}" -lt "${SPLIT_SIZE}" ]; then
+    echo "${remaining}"
+  else
+    echo "${SPLIT_SIZE}"
+  fi
+}
 
+function restore_split_image {
   echo "Starte die Prozesse ..."
   if [[ ${OUTPUT_FILE_TYPE} != "block special"* ]]; then
     echo "fallocate -l ${INPUT_SIZE} $OUTPUT_FILE"
-    if ! fallocate -l ${INPUT_SIZE} $OUTPUT_FILE; then
+    if ! fallocate -l "${INPUT_SIZE}" "${OUTPUT_FILE}"; then
       echo "Fehler: Speicherplatz für ${OUTPUT_FILE} konnte nicht reserviert werden (fallocate)."
       INTERNAL_EXITCODE=1
       return 1
     fi
   fi
-  for ((PART_NUM=0; PART_NUM<${NUM_JOBS}; PART_NUM++)); do
+
+  local PART_NUM START COUNT_BYTES
+  local dd_out
+  for ((PART_NUM=0; PART_NUM<NUM_JOBS; PART_NUM++)); do
     START=$((PART_NUM * SPLIT_SIZE))
-    OUTPUT_CMD="dd of=${OUTPUT_FILE} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / ${BLOCKSIZEBYTES})) seek=$((START / ${BLOCKSIZEBYTES})) iflag=fullblock conv=notrunc"
+    COUNT_BYTES=$(part_bytes "${PART_NUM}")
+    # Byte-genaue dd-Aufrufe (count_bytes/seek_bytes), damit auch nicht glatt
+    # teilbare Backups funktionieren. Direkte Pipelines statt eval-Strings:
+    # Pfade mit Leerzeichen o.ä. sind so ungefährlich.
+    dd_out=(dd of="${OUTPUT_FILE}" bs="${BLOCKSIZEBYTES}" iflag=fullblock,count_bytes count="${COUNT_BYTES}" oflag=seek_bytes seek="${START}" conv=notrunc)
     if [ $REMOTE -eq 1 ]; then
       # Remote netcat restore, unkomprimiert: Remote sendet, lokal wird empfangen und geschrieben
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is remote (uncompressed)"
       fi
-      REMOTE_INPUT_CMD="dd if=${INPUT_FILES}${PART_NUM}.part bs=${BLOCKSIZEBYTES} iflag=fullblock"
-      if ! remote_restore_commands "${REMOTE_INPUT_CMD}"; then
+      if ! remote_restore_commands "dd if=\"${INPUT_FILES}${PART_NUM}.part\" bs=${BLOCKSIZEBYTES} iflag=fullblock"; then
         echo "Remote-Restore-Sender für Teil ${PART_NUM} konnte nicht gestartet werden."
         break
       fi
-      FULL_CMD="${OUTPUT_CMD_REMOTE_SOURCE} | ${OUTPUT_CMD} &"
-    else
-      # Build individual subcommands and concatinate, if enabled
-      if [ ! -z "$COMPRESSION" ]; then
-        if [ $PART_NUM -eq 0 ]; then
-          echo "Source is compressed"
-        fi
-        INPUT_CMD="zcat ${INPUT_FILES}${PART_NUM}.gz"
-      else
-        if [ $PART_NUM -eq 0 ]; then
-          echo "Source is uncompressed"
-        fi
-        INPUT_CMD="dd if=${INPUT_FILES}${PART_NUM}.part bs=${BLOCKSIZEBYTES} iflag=fullblock"
+      echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | ${dd_out[*]}"
+      nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" </dev/null | "${dd_out[@]}" &
+    elif [ ! -z "$COMPRESSION" ]; then
+      if [ $PART_NUM -eq 0 ]; then
+        echo "Source is compressed"
       fi
-      FULL_CMD="${INPUT_CMD} | ${OUTPUT_CMD} &"
+      echo "zcat ${INPUT_FILES}${PART_NUM}.gz | ${dd_out[*]}"
+      zcat "${INPUT_FILES}${PART_NUM}.gz" | "${dd_out[@]}" &
+    else
+      if [ $PART_NUM -eq 0 ]; then
+        echo "Source is uncompressed"
+      fi
+      echo "dd if=${INPUT_FILES}${PART_NUM}.part bs=${BLOCKSIZEBYTES} iflag=fullblock | ${dd_out[*]}"
+      dd if="${INPUT_FILES}${PART_NUM}.part" bs="${BLOCKSIZEBYTES}" iflag=fullblock | "${dd_out[@]}" &
     fi
-    echo "$FULL_CMD"
-    eval "${FULL_CMD}"
     register_job $! "Teil ${PART_NUM} (restore)"
   done
 }

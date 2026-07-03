@@ -64,3 +64,32 @@ load helpers
   [ "$status" -ne 0 ]
   [[ "$output" == *"FAILED"* ]]
 }
+
+@test "Backup -> Restore mit nicht glatt teilbarer Größe ist bitgenau" {
+  # 8 MiB + 12345 Bytes: weder durch NUM_JOBS (4) noch durch die Blockgröße
+  # (1 MiB) teilbar — der letzte Teil überträgt den Rest (part_bytes).
+  make_testfile "$TMP/quelle.bin"
+  dd if=/dev/urandom bs=1 count=12345 status=none >> "$TMP/quelle.bin"
+  mkdir -p "$TMP/backup"
+
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -s
+  [ "$status" -eq 0 ]
+
+  vrun "$REPO_ROOT/ddpar-check.sh" -s "$TMP/quelle.bin" -b "$TMP/backup/quelle.bin"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"FAILED"* ]]
+
+  vrun "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/backup/quelle.bin" -o "$TMP/wieder.bin" -y
+  [ "$status" -eq 0 ]
+  cmp "$TMP/quelle.bin" "$TMP/wieder.bin"
+}
+
+@test "Clone Datei mit nicht glatt teilbarer Größe ist bitgenau" {
+  make_testfile "$TMP/quelle.bin" 4
+  dd if=/dev/urandom bs=1 count=999 status=none >> "$TMP/quelle.bin"
+  : > "$TMP/ziel.bin"
+
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/ziel.bin" -f
+  [ "$status" -eq 0 ]
+  cmp "$TMP/quelle.bin" "$TMP/ziel.bin"
+}

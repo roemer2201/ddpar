@@ -11,14 +11,15 @@ gleichzeitig im Hintergrund (`&`), am Ende wartet das Skript mit `wait` auf alle
 ```
 SPLIT_SIZE = INPUT_SIZE / NUM_JOBS
 
-Segment N:
-  Lesen:    dd if=INPUT  skip=$((N * SPLIT_SIZE / BLOCKSIZEBYTES))  count=$((SPLIT_SIZE / BLOCKSIZEBYTES))
-  Schreiben: dd of=OUTPUT seek=$((N * SPLIT_SIZE / BLOCKSIZEBYTES))
+Segment N (Offsets und Länge in Bytes, letztes Segment inkl. Rest):
+  Lesen:     dd if=INPUT  iflag=count_bytes,skip_bytes count=$(part_bytes N) skip=$((N * SPLIT_SIZE))
+  Schreiben: dd of=OUTPUT oflag=seek_bytes seek=$((N * SPLIT_SIZE)) conv=notrunc
 ```
 
-`INPUT_SIZE` muss durch `NUM_JOBS × BLOCKSIZEBYTES` ganzzahlig teilbar sein.
-Das Skript prüft dies in `size_calculation()` und gibt Hinweise auf alternative
-Job-Zahlen oder Blockgrößen, falls die Teilung nicht aufgeht.
+Beliebige Eingabegrößen werden unterstützt: `size_calculation()` rundet
+`SPLIT_SIZE` auf ein Vielfaches der Blockgröße ab; den nicht gleichmäßig
+verteilbaren Rest überträgt der letzte Teil (`part_bytes()`), byte-genau über
+die dd-Flags `count_bytes`/`skip_bytes`/`seek_bytes`.
 
 ---
 
@@ -141,6 +142,7 @@ ein neuer Port generiert.
 | `output_analysis` | Typ und Größe des Ziels bestimmen |
 | `remote_port_generation` | Zufälligen Port im Bereich 10000–42767 generieren |
 | `check_remote_port_availability` | Prüft ob ein Port auf dem Remote-Host frei ist |
-| `size_calculation` | SPLIT_SIZE berechnen, Teilbarkeit prüfen |
+| `size_calculation` | SPLIT_SIZE berechnen (auf Blockgröße abgerundet) |
+| `part_bytes` | Bytes je Teil; der letzte Teil übernimmt den Rest |
 | `clone_file` | Paralleler Clone einer regulären Datei |
 | `clone_block` | Paralleler Clone eines Block-Devices |

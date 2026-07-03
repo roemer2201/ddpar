@@ -50,7 +50,8 @@ REMOTE_BACKUP_DIR=/tmp/ddpar_backup
 
 ### Testdaten erstellen
 
-Eine 64 MiB große Testdatei anlegen (teilbar durch 4 Jobs × 1 MiB Blocksize):
+Eine 64 MiB große Testdatei anlegen (beliebige Größen sind möglich, ein nicht
+verteilbarer Rest wird vom letzten Teil übertragen):
 
 ```bash
 dd if=/dev/urandom of=$SOURCE_FILE bs=1M count=64
@@ -422,8 +423,8 @@ Beim Backup wird pro Teil eine SHA256-Checksumme erstellt:
 
 ### 5.2 Anzahl der Jobs anpassen (-j)
 
-> **Abweichung:** Die Eingabegröße muss durch die Anzahl der Jobs und die Blockgröße
-> gleichmäßig teilbar sein. Bei `$SOURCE_FILE` (64 MiB) sind z.B. 2 oder 8 Jobs möglich.
+> Die Eingabegröße muss nicht durch die Anzahl der Jobs teilbar sein — ein
+> Rest wird vom letzten Teil übertragen.
 
 ```bash
 ./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -j 2

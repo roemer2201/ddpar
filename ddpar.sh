@@ -366,55 +366,37 @@ function check_remote_port_availability {
 
 function size_calculation {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-  # Calculate the size of each input split file
+  # Berechnet die Teilgröße pro Job. SPLIT_SIZE wird auf ein Vielfaches der
+  # Blockgröße abgerundet; der Rest, der sich nicht gleichmäßig verteilen
+  # lässt, wird vom letzten Teil mit übertragen (siehe part_bytes). Dadurch
+  # sind beliebige Eingabegrößen möglich.
   echo -e "${INFOCOLOR}Calculate the size of each input split file${NOCOLOR}"
-  SPLIT_SIZE=$((INPUT_SIZE / NUM_JOBS))
-  echo -e "${INFOCOLOR}Splitsize: ${SPLIT_SIZE}${NOCOLOR}"
-  
-  # Check if all sizes have whole numbers
-  echo -e "${INFOCOLOR}Check if all sizes have whole numbers${NOCOLOR}"
-  if [ $((INPUT_SIZE % NUM_JOBS)) -ne 0 ] || [ $((SPLIT_SIZE % BLOCKSIZEBYTES)) -ne 0 ]; then
-    echo -e "${WARNCOLOR}WARN: The input file size (${INPUT_SIZE}) is not evenly divisible by the number of jobs (${NUM_JOBS}), or the resulting split size is not evenly divisible by defined blocksize in by bytes ($BLOCKSIZEBYTES).${NOCOLOR}"
-    # Calculate the next higher usable job number
-    echo -e "${INFOCOLOR}Calculate the next higher usable job number${NOCOLOR}"
-      for ((i=${NUM_JOBS}; i<$((${NUM_JOBS}**2)); i++)); do
-        if [ $((INPUT_SIZE % i)) -eq 0 ] && [ $(( $((INPUT_SIZE / i)) % BLOCKSIZEBYTES)) -eq 0 ]; then
-          #echo "i=${i} - ${INPUT_SIZE}/${NUM_JOBS} = $((INPUT_SIZE % i)) - SPLIT_SIZE: $(( $((INPUT_SIZE / i)) % BLOCKSIZEBYTES))"
-          echo -e "${SUCCESSCOLOR}INFO: The next higher usable Threadnumber is $i (at same Blocksize of ${BLOCKSIZEBYTES})${NOCOLOR}"
-          break
-        fi
-      done
-    # Calculate the next lower usable job number
-    echo -e "${INFOCOLOR}Calculate the next lower usable job number${NOCOLOR}"
-      for ((i=$NUM_JOBS; i>0; i--)); do
-        if [ $((INPUT_SIZE % i)) -eq 0 ] && [ $(( $((INPUT_SIZE / i)) % BLOCKSIZEBYTES)) -eq 0 ]; then
-          #echo "i=${i} - ${INPUT_SIZE}/${NUM_JOBS} = $((INPUT_SIZE % i)) - SPLIT_SIZE: $(( $((INPUT_SIZE / i)) % BLOCKSIZEBYTES))"
-          echo -e "${SUCCESSCOLOR}INFO: The next lower usable Threadnumber is $i (at same Blocksize of ${BLOCKSIZEBYTES}${NOCOLOR}"
-          break
-        fi
-      done
-    # Calculate the next higher usable blocksize number
-    echo -e "${INFOCOLOR}Calculate the next higher usable blocksize number${NOCOLOR}"
-    for ((i=$BLOCKSIZEBYTES; i<$(($BLOCKSIZEBYTES*4)); i++)); do
-      if [ $((INPUT_SIZE % i)) -eq 0 ] && [ $(( $((INPUT_SIZE / i)) % NUM_JOBS)) -eq 0 ]; then
-        #echo "i=${i} - ${INPUT_SIZE}/${NUM_JOBS} = $((INPUT_SIZE % i)) - SPLIT_SIZE: $(( $((INPUT_SIZE / i)) % BLOCKSIZEBYTES))"
-        echo -e "${SUCCESSCOLOR}INFO: The next higher usable blocksize number is $i (at same number of jobs (${NUM_JOBS}))${NOCOLOR}"
-        break
-      fi
-    done
-    # Calculate the next lower usable blocksize number
-    echo -e "${INFOCOLOR}Calculate the next lower usable blocksize number${NOCOLOR}"
-    for ((i=${BLOCKSIZEBYTES}; i>0; i--)); do
-      if [ $((INPUT_SIZE % i)) -eq 0 ] && [ $(( $((INPUT_SIZE / i)) % NUM_JOBS)) -eq 0 ]; then
-        #echo "i=${i} - ${INPUT_SIZE}/${NUM_JOBS} = $((INPUT_SIZE % i)) - SPLIT_SIZE: $(( $((INPUT_SIZE / i)) % BLOCKSIZEBYTES))"
-        echo -e "${SUCCESSCOLOR}INFO: The next lower usable blocksize number is ${i} (at same number of jobs (${NUM_JOBS}))${NOCOLOR}"
-        break
-      fi
-    done
-    exit 1
-  else
-    echo -e "${SUCCESSCOLOR}All sizes seem even.${NOCOLOR}"
+  SPLIT_SIZE=$(( (INPUT_SIZE / (NUM_JOBS * BLOCKSIZEBYTES)) * BLOCKSIZEBYTES ))
+  if [ "${SPLIT_SIZE}" -eq 0 ]; then
+    # Eingabe kleiner als NUM_JOBS Blöcke: die ersten Teile übertragen je
+    # einen Block, überzählige Teile bleiben leer.
+    SPLIT_SIZE=${BLOCKSIZEBYTES}
   fi
+  echo -e "${INFOCOLOR}Splitsize: ${SPLIT_SIZE}${NOCOLOR}"
+  if [ $((SPLIT_SIZE * NUM_JOBS)) -ne "${INPUT_SIZE}" ]; then
+    echo -e "${INFOCOLOR}Eingabegröße (${INPUT_SIZE}) ist nicht glatt durch Jobs x Blockgröße teilbar, der letzte Teil überträgt $(part_bytes $((NUM_JOBS - 1))) Bytes.${NOCOLOR}"
+  fi
+}
+
+function part_bytes {
+	# Bytes, die Teil $1 überträgt: normale Teile SPLIT_SIZE, der letzte Teil
+	# zusätzlich den nicht gleichmäßig verteilbaren Rest; bei Eingaben kleiner
+	# als NUM_JOBS Blöcke ggf. weniger oder 0.
+	local part=$1
+	local start=$((part * SPLIT_SIZE))
+	local remaining=$((INPUT_SIZE - start))
+	if [ "${remaining}" -le 0 ]; then
+		echo 0
+	elif [ "${part}" -eq $((NUM_JOBS - 1)) ] || [ "${remaining}" -lt "${SPLIT_SIZE}" ]; then
+		echo "${remaining}"
+	else
+		echo "${SPLIT_SIZE}"
+	fi
 }
 
 function clone_file {
@@ -428,7 +410,7 @@ function clone_file {
         OUTPUT_PATH="${OUTPUT}/${INPUT_FILE_NAME}"
     elif [[ "${OUTPUT_FILE_TYPE}" == *"No such file or directory"* ]]; then
         if [ ! -z "$FORCE" ]; then
-            if execute_command 'mkdir -p "${OUTPUT}"'; then
+            if execute_command "mkdir -p \"${OUTPUT}\""; then
                 OUTPUT_PATH="${OUTPUT}"
                 echo "Directory ${OUTPUT} created successfully."
             else
@@ -439,7 +421,7 @@ function clone_file {
             echo -e "${REQUESTCOLOR}${OUTPUT} does not exist, should this directory be created? (y/N)${NOCOLOR}"
             read answer
             if [ "$answer" == "y" ]; then
-                if execute_command 'mkdir -p "${OUTPUT}"'; then
+                if execute_command "mkdir -p \"${OUTPUT}\""; then
                     OUTPUT_PATH="${OUTPUT}"
                     echo -e "${SUCCESSCOLOR}Directory ${OUTPUT} created successfully.${NOCOLOR}"
                 else
@@ -496,27 +478,31 @@ function run_clone_parts {
 	# ein nc-Listener auf dem Remote-Host eingerichtet.
 	# ToDo: Checksum/Kompression für Clone analog zum Backup-Modus umsetzen.
 	local output_target=$1
-	local PART_NUM START INPUT_CMD OUTPUT_CMD FULL_CMD
+	local PART_NUM START COUNT_BYTES
+	local dd_in dd_out
 
 	for ((PART_NUM=0; PART_NUM<NUM_JOBS; PART_NUM++)); do
-		# Build individual subcommands and concatinate, if enabled
 		START=$((PART_NUM * SPLIT_SIZE))
-		INPUT_CMD="dd if=${INPUT} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES))"
-		OUTPUT_CMD="dd of=${output_target} bs=${BLOCKSIZEBYTES} seek=$((START / BLOCKSIZEBYTES))"
-		FULL_CMD="${INPUT_CMD}"
+		COUNT_BYTES=$(part_bytes "${PART_NUM}")
+		# Byte-genaue dd-Aufrufe (count_bytes/skip_bytes/seek_bytes), damit
+		# auch nicht glatt teilbare Eingabegrößen funktionieren. Arrays statt
+		# eval-Strings: Pfade mit Leerzeichen o.ä. sind so ungefährlich.
+		dd_in=(dd if="${INPUT}" bs="${BLOCKSIZEBYTES}" iflag=count_bytes,skip_bytes count="${COUNT_BYTES}" skip="${START}")
+		dd_out=(dd of="${output_target}" bs="${BLOCKSIZEBYTES}" oflag=seek_bytes seek="${START}" conv=notrunc)
 
 		if [ $REMOTE -eq 1 ]; then
-			if ! setup_remote_listener "${OUTPUT_CMD}"; then
+			# Die Empfängerseite läuft auf dem Remote-Host und wird als String
+			# über SSH gestartet; der Pfad ist dort in Anführungszeichen gesetzt.
+			if ! setup_remote_listener "dd of=\"${output_target}\" bs=${BLOCKSIZEBYTES} oflag=seek_bytes seek=${START} conv=notrunc"; then
 				echo -e "${ERRORCOLOR}Remote-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				return 1
 			fi
-			FULL_CMD="${FULL_CMD} | ${INPUT_CMD_REMOTE_EXTENSION} &"
+			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
 		else
-			FULL_CMD="${FULL_CMD} | ${OUTPUT_CMD} &"
+			echo -e "${INFOCOLOR}${dd_in[*]} | ${dd_out[*]}${NOCOLOR}"
+			"${dd_in[@]}" | "${dd_out[@]}" &
 		fi
-
-		echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
-		eval "${FULL_CMD}"
 		register_job $! "Teil ${PART_NUM} (clone)"
 	done
 }
@@ -536,8 +522,8 @@ function setup_remote_listener {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
 	# Richtet auf der Remote-Maschine einen netcat-Empfänger ein, der die
 	# übertragenen Daten in den übergebenen Befehl (z.B. "dd of=...") schreibt.
-	# Wird von Clone- und Backup-Modus gemeinsam genutzt.
-	# Setzt anschließend INPUT_CMD_REMOTE_EXTENSION für die lokale Senderseite.
+	# Wird von Clone- und Backup-Modus gemeinsam genutzt. Der Port für die
+	# lokale Senderseite steht anschließend in CURRENT_REMOTE_PORT.
 	local remote_output_cmd=$1
 
 	# Generate and check remote ports
@@ -586,8 +572,6 @@ function setup_remote_listener {
 		INTERNAL_EXITCODE=2
 		return 1
 	fi
-
-	INPUT_CMD_REMOTE_EXTENSION="nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}"
 }
 
 function backup_mode {
@@ -640,42 +624,47 @@ function backup_mode {
 	append_metadata "FILE_TYPE=${INPUT_FILE_TYPE}"
 	append_metadata "SPLIT_SIZE=${SPLIT_SIZE}"
 
-	local PART_NUM START INPUT_CMD OUTPUT_CMD FULL_CMD CHECKSUM_CMD COMPRESSION_CMD
+	if [ $COMPRESSION -eq 1 ] && [ $REMOTE -ne 1 ]; then
+		append_metadata "COMPRESSION=${COMPRESSION}"
+		append_metadata "COMPRESSION_LEVEL=${COMPRESSION_LEVEL}"
+	fi
+
+	local PART_NUM START COUNT_BYTES PART_BASE
+	local dd_in dd_out
 	echo -e "${INFOCOLOR}Starte die Prozesse ...${NOCOLOR}"
 	for ((PART_NUM=0; PART_NUM<NUM_JOBS; PART_NUM++)); do
 
-		# Build individual subcommands and concatinate, if enabled
 		START=$((PART_NUM * SPLIT_SIZE))
-		INPUT_CMD="dd if=${INPUT} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES))"
-		FULL_CMD="${INPUT_CMD}"
+		COUNT_BYTES=$(part_bytes "${PART_NUM}")
+		PART_BASE="${OUTPUT_FILE}${PART_NUM}"
+		# Byte-genaue dd-Aufrufe (count_bytes/skip_bytes), damit auch nicht
+		# glatt teilbare Eingabegrößen funktionieren. Direkte Pipelines statt
+		# eval-Strings: Pfade mit Leerzeichen o.ä. sind so ungefährlich.
+		dd_in=(dd if="${INPUT}" bs="${BLOCKSIZEBYTES}" iflag=count_bytes,skip_bytes count="${COUNT_BYTES}" skip="${START}")
+		dd_out=(dd of="${PART_BASE}.part" bs="${BLOCKSIZEBYTES}")
+
 		if [ $REMOTE -eq 1 ]; then
-			# Remote netcat backup, unkomprimiert, ohne Checksumme
-			OUTPUT_CMD="dd of=${OUTPUT_FILE}${PART_NUM}.part bs=${BLOCKSIZEBYTES}"
-			if ! setup_remote_listener "${OUTPUT_CMD}"; then
+			# Remote netcat backup, unkomprimiert, ohne Checksumme. Die
+			# Empfängerseite läuft auf dem Remote-Host (String via SSH).
+			if ! setup_remote_listener "dd of=\"${PART_BASE}.part\" bs=${BLOCKSIZEBYTES}"; then
 				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				break
 			fi
-			FULL_CMD="${FULL_CMD} | ${INPUT_CMD_REMOTE_EXTENSION} &"
+			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+		elif [ $CHECKSUM -eq 1 ] && [ $COMPRESSION -eq 1 ]; then
+			echo -e "${INFOCOLOR}${dd_in[*]} | tee >(sha256sum > ${PART_BASE}.sha256) | gzip -${COMPRESSION_LEVEL} > ${PART_BASE}.gz${NOCOLOR}"
+			"${dd_in[@]}" | tee >(sha256sum > "${PART_BASE}.sha256") | gzip -"${COMPRESSION_LEVEL}" > "${PART_BASE}.gz" &
+		elif [ $COMPRESSION -eq 1 ]; then
+			echo -e "${INFOCOLOR}${dd_in[*]} | gzip -${COMPRESSION_LEVEL} > ${PART_BASE}.gz${NOCOLOR}"
+			"${dd_in[@]}" | gzip -"${COMPRESSION_LEVEL}" > "${PART_BASE}.gz" &
+		elif [ $CHECKSUM -eq 1 ]; then
+			echo -e "${INFOCOLOR}${dd_in[*]} | tee >(sha256sum > ${PART_BASE}.sha256) | ${dd_out[*]}${NOCOLOR}"
+			"${dd_in[@]}" | tee >(sha256sum > "${PART_BASE}.sha256") | "${dd_out[@]}" &
 		else
-			if [ $CHECKSUM -eq 1 ]; then
-				CHECKSUM_CMD="tee >(sha256sum > ${OUTPUT_FILE}${PART_NUM}.sha256)"
-				FULL_CMD="${FULL_CMD} | $CHECKSUM_CMD"
-			fi
-			if [ $COMPRESSION -eq 1 ]; then
-				if [ $PART_NUM -eq 0 ]; then
-					# Append compression and its level to metadata file
-					append_metadata "COMPRESSION=${COMPRESSION}"
-					append_metadata "COMPRESSION_LEVEL=${COMPRESSION_LEVEL}"
-				fi
-				COMPRESSION_CMD="gzip -${COMPRESSION_LEVEL} > ${OUTPUT_FILE}${PART_NUM}.gz"
-				FULL_CMD="${FULL_CMD} | $COMPRESSION_CMD &"
-			else
-				OUTPUT_CMD="dd of=${OUTPUT_FILE}${PART_NUM}.part bs=${BLOCKSIZEBYTES}"
-				FULL_CMD="${FULL_CMD} | $OUTPUT_CMD &"
-			fi
+			echo -e "${INFOCOLOR}${dd_in[*]} | ${dd_out[*]}${NOCOLOR}"
+			"${dd_in[@]}" | "${dd_out[@]}" &
 		fi
-		echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
-		eval "${FULL_CMD}"
 		register_job $! "Teil ${PART_NUM} (backup)"
 	done
 }

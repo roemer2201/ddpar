@@ -155,7 +155,7 @@ docker compose exec target ls -l /backup
 Variablen können beim Start gesetzt werden, z.B.:
 
 ```bash
-# Größere Testdatei (muss durch NUM_JOBS × Blocksize teilbar sein)
+# Größere Testdatei
 TEST_SIZE_MB=256 docker compose up -d --build
 
 # Anderes Root-Passwort (für sshpass-/Passwort-Tests)
