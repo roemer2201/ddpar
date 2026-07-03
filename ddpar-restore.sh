@@ -40,10 +40,9 @@ while getopts ":i:o:r::R:yh" opt; do
     y) ASSUME_YES=1;;
     r)
       REMOTE=1
-      if [[ ${OPTARG} =~ ^[lnc]+$ ]]; then
-        REMOTE_MODE="${OPTARG}"
-      else
-        REMOTE_MODE="n"
+      # Bisher ist nur Modus "n" (netcat, Datenkanal unverschlüsselt) implementiert.
+      if [[ ${OPTARG} =~ [lc] ]]; then
+        echo "[WARN] Remote-Modus '${OPTARG}' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat."
       fi
       ;;
     R)
@@ -68,10 +67,10 @@ function establish_ssh_connection {
       echo "Der Befehl \"sshpass\" existiert nicht. Bitte installieren Sie das entsprechende Paket über ihren Paketmanager."
       exit 1
     fi
-    sshpass -p "$password" ssh -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
+    SSHPASS="$password" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
   else
     echo "Verbindungsaufbau mit Sockel ${control_path} zu ${target}"
-    ssh -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
+    ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
   fi
   return $?
 }
@@ -92,7 +91,7 @@ function connect_ssh {
     echo "SSH-Verbindung zu ${REMOTE_HOST} besteht bereits."
     return 0
   fi
-  output=$(ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_HOST} true 2>&1)
+  output=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_HOST} true 2>&1)
   if [[ $? -eq 0 ]]; then
     echo "Passwortloser Verbindungsaufbau war erfolgreich."
     establish_ssh_connection "${REMOTE_HOST}" "${SSH_SOCKET_PATH}"

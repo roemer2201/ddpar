@@ -1,5 +1,41 @@
 # Changelog
 
+## [Unreleased] – branch claude/project-improvement-review-fe3jux (konsolidierter Stack)
+
+### Hinzugefügt
+- **Beliebige Eingabegrößen:** `size_calculation` rundet `SPLIT_SIZE` auf ein
+  Vielfaches der Blockgröße ab statt bei unteilbaren Größen abzubrechen; der
+  Rest wird vom letzten Teil übertragen (`part_bytes`, dd-Flags
+  `count_bytes`/`skip_bytes`/`seek_bytes`). Damit funktionieren echte
+  Plattengrößen ohne manuelles Austarieren von `-j`/`-b`
+- **Fehlerbehandlung paralleler Jobs:** `set -o pipefail` in allen Skripten;
+  Teil-Jobs werden mit PID registriert (`register_job`/`wait_for_jobs`), ihre
+  Exit-Codes einzeln eingesammelt und aggregiert — ein fehlgeschlagener Teil
+  führt zu Exit-Code `!= 0` statt stillem Erfolg
+- **Signal-Cleanup:** `trap INT/TERM` beendet laufende Teil-Prozesse, räumt
+  remote gestartete nc-Listener ab und schließt die SSH-Verbindung
+- **ddpar-check.sh:** endet bei Abweichungen mit Exit-Code `!= 0`
+  (skripting-/CI-tauglich); liest `INPUT_SIZE` aus den Metadaten
+- Tests für nicht glatt teilbare Größen (Backup→Check→Restore und Clone)
+
+### Geändert
+- **Refactoring:** gemeinsame Teil-Schleife `run_clone_parts` für
+  `clone_file`/`clone_block`; `setup_remote_listener` (vormals
+  `remote_backup_commands`) wird von Clone- und Backup-Modus genutzt;
+  Backup-Modus in Funktion `backup_mode` extrahiert
+- **eval entfernt:** dd/gzip/tee-Pipelines werden direkt gestartet (Bash-Arrays
+  bzw. explizite Verzweigungen); Pfade mit Leerzeichen/Metazeichen sind
+  ungefährlich. Remote-Befehle laufen weiterhin als String über SSH (dort
+  gequotet)
+- **Sicherheit:** `StrictHostKeyChecking=accept-new` statt `no` (geänderte
+  Host-Keys führen zum Abbruch); `sshpass -e` statt `-p` (Passwort nicht mehr
+  in der Prozessliste); nicht implementierte Remote-Modi `l`/`c` erzeugen eine
+  Warnung statt still auf unverschlüsselt zurückzufallen
+- Clone-Schreibseite mit `conv=notrunc` (kein Truncate-Wettlauf paralleler
+  Writer); `mkdir`-Aufruf in `clone_file` expandiert `${OUTPUT}` jetzt korrekt
+- README vollständig überarbeitet (Schnellstart, Voraussetzungen,
+  Sicherheitshinweise, Exit-Codes, aktualisierte Funktionsmatrix)
+
 ## [Unreleased] – branch claude/great-cori-29qjug (auf testing-docker aufbauend)
 
 ### Hinzugefügt

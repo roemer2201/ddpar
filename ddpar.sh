@@ -40,10 +40,10 @@ function show_help {
   echo "-d                      Debug Modus"
   echo ""
   echo "Remote-Optionen:"
-  echo "n: Standardeinstellung, No encryption, Verbindungsaufbau verschlüsselt, Datenübertragung unverschlüsselt"
-  echo "l: Übertragung vollständig verschlüsselt, keine Kompression"
-  echo "c: Aktiviert Remote-Kompression, Kompressionsvorgang erfolgt auf der Remote-Maschine"
-  echo "   Ist \"-c, --compression\" aktiviert und wird \"-r ...\" ohne \"c\" verwendet, erfolgt die Kompression lokal"
+  echo "n: Standardeinstellung, No encryption, Verbindungsaufbau verschlüsselt (SSH),"
+  echo "   Datenübertragung unverschlüsselt über netcat (nur in vertrauenswürdigen Netzen verwenden!)"
+  echo "l: GEPLANT, noch nicht implementiert: Übertragung vollständig verschlüsselt"
+  echo "c: GEPLANT, noch nicht implementiert: Kompression auf der Remote-Maschine"
 }
 
 function option_analysis {
@@ -83,10 +83,11 @@ function option_analysis {
         ;;
       r)
         REMOTE=1
-        if [[ ${OPTARG} =~ ^[lnc]+$ ]]; then
-          REMOTE_MODE="${OPTARG}"
-        else
-          REMOTE_MODE="l"
+        # Bisher ist nur Modus "n" (netcat, Datenkanal unverschlüsselt)
+        # implementiert. "l" (verschlüsselt) und "c" (Remote-Kompression)
+        # sind geplant — hier ehrlich warnen statt still zurückzufallen.
+        if [[ ${OPTARG} =~ [lc] ]]; then
+          echo -e "${WARNCOLOR}[WARN] Remote-Modus '${OPTARG}' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat.${NOCOLOR}"
         fi
         ;;
       R)
@@ -152,10 +153,10 @@ function establish_ssh_connection {
           echo -e "${ERRORCOLOR}Der Befehl \"sshpass\" existiert nicht. Bitte installieren Sie das entsprechende Paket ueber ihren Paketmanager${NOCOLOR}"
           exit 1
         fi
-        sshpass -p "$password" ssh -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
+        SSHPASS="$password" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
     else
         echo -e "${INFOCOLOR}Verbindungsaufbau mit Sockel ${control_path} zu ${target}${NOCOLOR}"
-        ssh -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
+        ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
     fi
 
     return $?
@@ -175,7 +176,7 @@ function connect_ssh {
     fi
 
     # Prüfen, ob der Host per SSH erreichbar ist
-    output=$(ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_HOST} true 2>&1)
+    output=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_HOST} true 2>&1)
     
     # Überprüfung des Exit Codes und der Ausgabe
     if [[ $? -eq 0 ]]; then

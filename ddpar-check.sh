@@ -47,10 +47,10 @@ function establish_ssh_connection {
       echo "Der Befehl \"sshpass\" existiert nicht. Bitte installieren Sie das entsprechende Paket über ihren Paketmanager."
       exit 1
     fi
-    sshpass -p "$password" ssh -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
+    SSHPASS="$password" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
   else
     echo "Verbindungsaufbau mit Sockel ${control_path} zu ${target}"
-    ssh -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
+    ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
   fi
   return $?
 }
@@ -71,7 +71,7 @@ function connect_ssh {
     echo "SSH-Verbindung zu ${REMOTE_HOST} besteht bereits."
     return 0
   fi
-  output=$(ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_HOST} true 2>&1)
+  output=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_HOST} true 2>&1)
   if [[ $? -eq 0 ]]; then
     echo "Passwortloser Verbindungsaufbau war erfolgreich."
     establish_ssh_connection "${REMOTE_HOST}" "${SSH_SOCKET_PATH}"
@@ -283,11 +283,8 @@ while getopts ":b:s:d:j:B:r::R:h" opt; do
     B) echo "Set BLOCKSIZEBYTES=$OPTARG"; BLOCKSIZEBYTES="$OPTARG" ;;
     r)
       REMOTE=1
-      if [[ ${OPTARG} =~ ^[lnc]+$ ]]; then
-        REMOTE_MODE="${OPTARG}"
-      else
-        REMOTE_MODE="n"
-      fi
+      # Der Remote-Check überträgt nur SHA256-Hashes über SSH; die Modi l/c
+      # aus ddpar.sh sind hier ohne Bedeutung.
       ;;
     R)
       REMOTE=1
