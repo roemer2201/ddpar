@@ -1,6 +1,9 @@
 #!/bin/bash
 
-
+# Fehler in dd-/sha256sum-Pipelines sollen den Exit-Code der Pipeline
+# bestimmen — so führt ein fehlgeschlagener Vergleich (sha256sum -c) zu
+# einem Fehler-Exit des jeweiligen Teil-Jobs.
+set -o pipefail
 
 # Set the input and output file names
 #OUTPUT_PATH=/dev
@@ -9,6 +12,7 @@
 #OUTPUT_FILE_TYPE="$(file -b $OUTPUT_FILE)"
 BASE_PATH=""
 BASE_FILE_NAME=""
+INTERNAL_EXITCODE=0
 NUM_JOBS=4
 BLOCKSIZEBYTES=1048576
 REMOTE=0
@@ -107,6 +111,57 @@ function close_ssh_connection {
   fi
 }
 
+# Verwaltung der parallelen Vergleichs-Jobs:
+# Jeder Teil-Vergleich wird mit PID und Beschreibung registriert, damit
+# wait_for_jobs die Exit-Codes einzeln einsammeln kann. So endet das Skript
+# mit Exit-Code != 0, sobald ein Segment nicht übereinstimmt.
+JOB_PIDS=()
+JOB_LABELS=()
+
+function register_job {
+  JOB_PIDS+=("$1")
+  JOB_LABELS+=("$2")
+}
+
+function wait_for_jobs {
+  local failed=0
+  local i rc
+  for i in "${!JOB_PIDS[@]}"; do
+    wait "${JOB_PIDS[$i]}"
+    rc=$?
+    if [ $rc -ne 0 ]; then
+      echo "Fehler: ${JOB_LABELS[$i]} meldet Abweichung oder Lesefehler (Exit-Code ${rc})."
+      failed=$((failed + 1))
+    fi
+  done
+  JOB_PIDS=()
+  JOB_LABELS=()
+  if [ $failed -gt 0 ]; then
+    echo "Prüfung FEHLGESCHLAGEN: ${failed} Segment(e) weichen ab oder konnten nicht gelesen werden."
+    INTERNAL_EXITCODE=1
+    return 1
+  fi
+  echo "Prüfung erfolgreich: Alle Segmente stimmen überein."
+  return 0
+}
+
+function cleanup_on_signal {
+  trap - INT TERM
+  echo "Abbruch: Beende laufende Vergleichs-Prozesse ..." >&2
+  local pids
+  pids=$(jobs -p)
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086 # PIDs sind whitespace-getrennt gewollt
+    kill $pids 2>/dev/null
+    wait $pids 2>/dev/null
+  fi
+  if [ $REMOTE -eq 1 ] && is_ssh_socket_alive; then
+    close_ssh_connection
+  fi
+  exit 130
+}
+trap cleanup_on_signal INT TERM
+
 function local_seg_hash {
   # $1 = Datei/Device (lokal), $2 = Segment-Index. Liefert SHA256 des Segments.
   local f=$1 idx=$2
@@ -141,6 +196,7 @@ function check_restored_image {
           echo "Segment $i: OK ($h_bak)"
         else
           echo "Segment $i: MISMATCH (backup=$h_bak, destination=$h_dst)"
+          exit 1
         fi
       ) &
     else
@@ -148,6 +204,7 @@ function check_restored_image {
       echo "dd if=$OUTPUT_FILE bs=$BLOCKSIZEBYTES count=$((SPLIT_SIZE / $BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES)) status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &"
       dd if=$OUTPUT_FILE bs=$BLOCKSIZEBYTES count=$((SPLIT_SIZE / $BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES)) status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &
     fi
+    register_job $! "Segment $i (restore-check)"
   done
 }
 
@@ -162,6 +219,7 @@ function check_backuped_image {
           echo "Segment $i: OK ($h_src)"
         else
           echo "Segment $i: MISMATCH (source=$h_src, backup=$h_bak)"
+          exit 1
         fi
       ) &
     else
@@ -169,6 +227,7 @@ function check_backuped_image {
       echo "dd if=$INPUT_FILE bs=$BLOCKSIZEBYTES count=$((SPLIT_SIZE / $BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES)) status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &"
       dd if=$INPUT_FILE bs=$BLOCKSIZEBYTES count=$((SPLIT_SIZE / $BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES)) status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &
     fi
+    register_job $! "Segment $i (backup-check)"
   done
 }
 
@@ -189,10 +248,11 @@ function check_cloned_image {
         echo "Segment $i: OK ($HASH_SRC)"
       else
         echo "Segment $i: MISMATCH (src=$HASH_SRC, dst=$HASH_DST)"
+        exit 1
       fi
     ) &
+    register_job $! "Segment $i (clone-check)"
   done
-  wait
 }
 
 # Verwendung von getopts zur Verarbeitung der Optionen
@@ -383,8 +443,10 @@ if [ -n "$SOURCE" ] && [ -z "$BASE_PATH" ] && [ -n "$DESTINATION" ]; then
 fi
 
 
-wait
+wait_for_jobs
 
 if [ $REMOTE -eq 1 ]; then
   close_ssh_connection
 fi
+
+exit ${INTERNAL_EXITCODE}

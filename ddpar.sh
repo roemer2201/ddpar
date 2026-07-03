@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Fehler in dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
+# sonst zählt nur der letzte Befehl (z.B. ein erfolgreiches dd of=...).
+set -o pipefail
+
 # Standardwerte für die Parameter
 INPUT_FILE=""
 OUTPUT_PATH=""
@@ -506,6 +510,7 @@ function clone_file {
 
             echo -e "${INFOCOLOR}REMOTE COMMAND: nc -N -l ${CURRENT_REMOTE_PORT} | ${OUTPUT_CMD}${NOCOLOR}"
             execute_remote_background_command "nc -N -l ${CURRENT_REMOTE_PORT} | ${OUTPUT_CMD}"
+            REMOTE_LISTENER_PORTS+=("${CURRENT_REMOTE_PORT}")
 			
 			# Check if execute_remote_background_command is running
 			MAX_ATTEMPTS=3 # Anzahl der maximalen Versuche
@@ -548,7 +553,8 @@ function clone_file {
 
         echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
         eval "${FULL_CMD}"
-    
+        register_job $! "Teil ${PART_NUM} (clone_file)"
+
     done
 }
 
@@ -620,6 +626,7 @@ function clone_block {
 
             echo -e "${INFOCOLOR}REMOTE COMMAND: nc -N -l ${CURRENT_REMOTE_PORT} | ${OUTPUT_CMD}${NOCOLOR}"
             execute_remote_background_command "nc -N -l ${CURRENT_REMOTE_PORT} | ${OUTPUT_CMD}"
+            REMOTE_LISTENER_PORTS+=("${CURRENT_REMOTE_PORT}")
 			
 			# Check if execute_remote_background_command is running
 			MAX_ATTEMPTS=3 # Anzahl der maximalen Versuche
@@ -662,6 +669,7 @@ function clone_block {
 		
 		echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
 		eval "${FULL_CMD}"
+		register_job $! "Teil ${PART_NUM} (clone_block)"
     done
 }
 
@@ -701,6 +709,7 @@ function remote_backup_commands {
 
 	echo -e "${INFOCOLOR}REMOTE COMMAND: nc -N -l ${CURRENT_REMOTE_PORT} | ${remote_output_cmd}${NOCOLOR}"
 	execute_remote_background_command "nc -N -l ${CURRENT_REMOTE_PORT} | ${remote_output_cmd}"
+	REMOTE_LISTENER_PORTS+=("${CURRENT_REMOTE_PORT}")
 
 	# Check if execute_remote_background_command is running
 	MAX_ATTEMPTS=3 # Anzahl der maximalen Versuche
@@ -732,10 +741,67 @@ function remote_backup_commands {
 	INPUT_CMD_REMOTE_EXTENSION="nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}"
 }
 
+# Verwaltung der parallelen Hintergrund-Jobs:
+# Jeder gestartete Teil-Job wird mit PID und Beschreibung registriert, damit
+# wait_for_jobs die Exit-Codes einzeln einsammeln kann. Ein nacktes "wait"
+# würde Fehler einzelner dd-/nc-Pipelines verschlucken.
+JOB_PIDS=()
+JOB_LABELS=()
+# Ports, auf denen remote nc-Listener gestartet wurden (für Cleanup bei Abbruch)
+REMOTE_LISTENER_PORTS=()
+
+function register_job {
+	JOB_PIDS+=("$1")
+	JOB_LABELS+=("$2")
+}
+
+function wait_for_jobs {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	local failed=0
+	local i rc
+	for i in "${!JOB_PIDS[@]}"; do
+		wait "${JOB_PIDS[$i]}"
+		rc=$?
+		if [ $rc -ne 0 ]; then
+			echo -e "${ERRORCOLOR}Fehler: ${JOB_LABELS[$i]} ist mit Exit-Code ${rc} fehlgeschlagen.${NOCOLOR}"
+			failed=$((failed + 1))
+		fi
+	done
+	JOB_PIDS=()
+	JOB_LABELS=()
+	if [ $failed -gt 0 ]; then
+		echo -e "${ERRORCOLOR}Fehler: ${failed} parallele(r) Job(s) fehlgeschlagen. Das Ergebnis ist unvollständig!${NOCOLOR}"
+		INTERNAL_EXITCODE=1
+		return 1
+	fi
+	echo -e "${SUCCESSCOLOR}Alle parallelen Jobs erfolgreich beendet.${NOCOLOR}"
+	return 0
+}
+
+function cleanup_on_signal {
+	trap - INT TERM
+	echo -e "${WARNCOLOR}Abbruch: Beende laufende Teil-Prozesse ...${NOCOLOR}" >&2
+	local pids port
+	pids=$(jobs -p)
+	if [ -n "$pids" ]; then
+		# shellcheck disable=SC2086 # PIDs sind whitespace-getrennt gewollt
+		kill $pids 2>/dev/null
+		wait $pids 2>/dev/null
+	fi
+	if [ $REMOTE -eq 1 ] && is_ssh_socket_alive; then
+		for port in "${REMOTE_LISTENER_PORTS[@]}"; do
+			execute_remote_command "pkill -f 'nc -N -l ${port}'" 2>/dev/null
+		done
+		close_ssh_connection
+	fi
+	exit 130
+}
+
 
 ################
 # Script Start #
 ################
+trap cleanup_on_signal INT TERM
 set_colors
 option_analysis "$@"
 input_analysis
@@ -779,8 +845,8 @@ case $MODE in
                 clone_file
                 ;;
         esac
-        # Wait for all jobs to finish
-        wait
+        # Wait for all jobs to finish and collect their exit codes
+        wait_for_jobs
         ;;
     "backup")
         if [[ "${OUTPUT_FILE_TYPE}" != *"directory"* ]]; then
@@ -868,6 +934,7 @@ case $MODE in
         fi
         echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
         eval "${FULL_CMD}"
+        register_job $! "Teil ${PART_NUM} (backup)"
         done
         
         
@@ -879,11 +946,12 @@ case $MODE in
         #  dd if=${INPUT} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / ${BLOCKSIZEBYTES})) skip=$((START / ${BLOCKSIZEBYTES})) | tee >(sha256sum > ${OUTPUT_FILE}${PART_NUM}.sha256) | gzip > ${OUTPUT_FILE}${PART_NUM}.gz &
         #done
 
-        # Wait for all jobs to finish
-        wait
+        # Wait for all jobs to finish and collect their exit codes
+        wait_for_jobs
         ;;
     *)
         echo "Ungültiger Modus: $MODE. Gültige Angaben: clone|backup"
+        INTERNAL_EXITCODE=1
         ;;
 esac
 

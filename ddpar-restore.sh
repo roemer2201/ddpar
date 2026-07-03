@@ -1,9 +1,14 @@
 #!/bin/bash
 
+# Fehler in zcat-/dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
+# sonst zählt nur der letzte Befehl (z.B. ein erfolgreiches dd of=...).
+set -o pipefail
+
 # Set default input and output file names
 
 INPUT_FILE_BASENAME=""
 OUTPUT_FILE=""
+INTERNAL_EXITCODE=0
 REMOTE=0
 REMOTE_HOST=""
 SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
@@ -177,6 +182,7 @@ function remote_restore_commands {
 
   echo "REMOTE COMMAND: ${remote_input_cmd} | nc -N -l ${CURRENT_REMOTE_PORT}"
   execute_remote_background_command "${remote_input_cmd} | nc -N -l ${CURRENT_REMOTE_PORT}"
+  REMOTE_LISTENER_PORTS+=("${CURRENT_REMOTE_PORT}")
 
   MAX_ATTEMPTS=3
   SLEEP_INTERVAL=1
@@ -202,6 +208,61 @@ function remote_restore_commands {
   OUTPUT_CMD_REMOTE_SOURCE="nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null"
 }
 
+# Verwaltung der parallelen Hintergrund-Jobs:
+# Jeder gestartete Teil-Job wird mit PID und Beschreibung registriert, damit
+# wait_for_jobs die Exit-Codes einzeln einsammeln kann. Ein nacktes "wait"
+# würde Fehler einzelner Restore-Pipelines verschlucken.
+JOB_PIDS=()
+JOB_LABELS=()
+REMOTE_LISTENER_PORTS=()
+
+function register_job {
+  JOB_PIDS+=("$1")
+  JOB_LABELS+=("$2")
+}
+
+function wait_for_jobs {
+  local failed=0
+  local i rc
+  for i in "${!JOB_PIDS[@]}"; do
+    wait "${JOB_PIDS[$i]}"
+    rc=$?
+    if [ $rc -ne 0 ]; then
+      echo "Fehler: ${JOB_LABELS[$i]} ist mit Exit-Code ${rc} fehlgeschlagen."
+      failed=$((failed + 1))
+    fi
+  done
+  JOB_PIDS=()
+  JOB_LABELS=()
+  if [ $failed -gt 0 ]; then
+    echo "Fehler: ${failed} parallele(r) Job(s) fehlgeschlagen. Die Wiederherstellung ist unvollständig!"
+    INTERNAL_EXITCODE=1
+    return 1
+  fi
+  echo "Alle parallelen Jobs erfolgreich beendet."
+  return 0
+}
+
+function cleanup_on_signal {
+  trap - INT TERM
+  echo "Abbruch: Beende laufende Teil-Prozesse ..." >&2
+  local pids port
+  pids=$(jobs -p)
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086 # PIDs sind whitespace-getrennt gewollt
+    kill $pids 2>/dev/null
+    wait $pids 2>/dev/null
+  fi
+  if [ $REMOTE -eq 1 ] && is_ssh_socket_alive; then
+    for port in "${REMOTE_LISTENER_PORTS[@]}"; do
+      execute_remote_command "pkill -f 'nc -N -l ${port}'" 2>/dev/null
+    done
+    close_ssh_connection
+  fi
+  exit 130
+}
+trap cleanup_on_signal INT TERM
+
 function restore_split_image {
 #  for ((i=0; i<$NUM_JOBS; i++)); do
 #    START=$((i * SPLIT_SIZE))
@@ -213,7 +274,11 @@ function restore_split_image {
   echo "Starte die Prozesse ..."
   if [[ ${OUTPUT_FILE_TYPE} != "block special"* ]]; then
     echo "fallocate -l ${INPUT_SIZE} $OUTPUT_FILE"
-    fallocate -l ${INPUT_SIZE} $OUTPUT_FILE
+    if ! fallocate -l ${INPUT_SIZE} $OUTPUT_FILE; then
+      echo "Fehler: Speicherplatz für ${OUTPUT_FILE} konnte nicht reserviert werden (fallocate)."
+      INTERNAL_EXITCODE=1
+      return 1
+    fi
   fi
   for ((PART_NUM=0; PART_NUM<${NUM_JOBS}; PART_NUM++)); do
     START=$((PART_NUM * SPLIT_SIZE))
@@ -246,6 +311,7 @@ function restore_split_image {
     fi
     echo "$FULL_CMD"
     eval "${FULL_CMD}"
+    register_job $! "Teil ${PART_NUM} (restore)"
   done
 }
 
@@ -393,9 +459,11 @@ fi
 #else
 #  echo "Input File Type ($INPUT_FILE_TYPE) stimmt nicht mit Output File Type ($OUTPUT_FILE_TYPE) überein."
 #fi
-wait
+wait_for_jobs
 
 if [ $REMOTE -eq 1 ]; then
   rm -f "$METADATA_SRC"
   close_ssh_connection
 fi
+
+exit ${INTERNAL_EXITCODE}

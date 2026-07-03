@@ -45,6 +45,7 @@ load helpers
   [ "$status" -eq 0 ]
 
   vrun "$REPO_ROOT/ddpar-check.sh" -s "$TMP/quelle.bin" -b "$TMP/backup/quelle.bin"
+  [ "$status" -eq 0 ]
   [[ "$output" == *"OK"* ]]
   [[ "$output" != *"FAILED"* ]]
 }
@@ -60,5 +61,6 @@ load helpers
   printf 'tampered' | dd of="$TMP/quelle.bin" bs=1 seek=0 conv=notrunc status=none
 
   vrun "$REPO_ROOT/ddpar-check.sh" -s "$TMP/quelle.bin" -b "$TMP/backup/quelle.bin"
+  [ "$status" -ne 0 ]
   [[ "$output" == *"FAILED"* ]]
 }
