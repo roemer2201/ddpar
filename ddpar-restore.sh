@@ -1,9 +1,19 @@
 #!/bin/bash
 
+# Fehler in zcat-/dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
+# sonst zählt nur der letzte Befehl (z.B. ein erfolgreiches dd of=...).
+set -o pipefail
+
 # Set default input and output file names
 
 INPUT_FILE_BASENAME=""
 OUTPUT_FILE=""
+INTERNAL_EXITCODE=0
+REMOTE=0
+REMOTE_HOST=""
+SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
+DEBUG=0
+ASSUME_YES=0
 
 # Hilfemeldung anzeigen
 function show_help {
@@ -12,57 +22,305 @@ function show_help {
   echo "Verwendung: $SCRIPT_NAME [Optionen]"
   echo ""
   echo "Optionen:"
-  echo "-i, --input PATH        Der Basisname des geteilten Abbildes"
-  echo "-o, --output PATH       Vollständiger Pfad des Zielgeräts"
+  echo "-i, --input PATH        Der Basisname des geteilten Abbildes (bei Remote: Pfad auf dem Remote-Host)"
+  echo "-o, --output PATH       Vollständiger Pfad des (lokalen) Zielgeräts"
+  echo "-r [n]                  Remote-Restore über SSH+Netcat (nur unkomprimiert)"
+  echo "-R user@host            Angabe des Remote-Host, auf dem das Backup liegt"
+  echo "-y                      Sicherheitsabfrage überspringen (assume yes)"
   echo "-h, --help              Diese Hilfe anzeigen"
   echo ""
   echo "Die Anzahl der Jobs und Blockgröße kann nicht geändert werden. Sie wird beim Erstellen des Abbildes festgelegt."
 }
 
 # Verwendung von getopts zur Verarbeitung der Optionen
-while getopts ":i:o:h" opt; do
+while getopts ":i:o:r::R:yh" opt; do
   case $opt in
     i|-input) INPUT="$OPTARG";;
     o|-output) OUTPUT="$OPTARG";;
+    y) ASSUME_YES=1;;
+    r)
+      REMOTE=1
+      # Bisher ist nur Modus "n" (netcat, Datenkanal unverschlüsselt) implementiert.
+      if [[ ${OPTARG} =~ [lc] ]]; then
+        echo "[WARN] Remote-Modus '${OPTARG}' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat."
+      fi
+      ;;
+    R)
+      REMOTE=1
+      if [ -n "${OPTARG}" ]; then
+        REMOTE_HOST="${OPTARG}"
+      fi
+      ;;
     h|-help) show_help; exit 1;;
     \?) echo "Ungültige Option: -$OPTARG";;
   esac
 done
 
 
-function restore_split_image {
-#  for ((i=0; i<$NUM_JOBS; i++)); do
-#    START=$((i * SPLIT_SIZE))
-#    touch $OUTPUT_FILE
-#    echo "zcat ${INPUT_FILES}${i}.gz | dd of=$OUTPUT_FILE bs=$BLOCKSIZEBYTES seek=$((START / BLOCKSIZEBYTES)) &"
-#    zcat ${INPUT_FILES}${i}.gz | dd of=$OUTPUT_FILE bs=$BLOCKSIZEBYTES seek=$((START / BLOCKSIZEBYTES)) &
-#  done
+function establish_ssh_connection {
+  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
+  local target=$1
+  local control_path=$2
+  local password=$3
+  if [ -n "$password" ]; then
+    if ! which sshpass > /dev/null; then
+      echo "Der Befehl \"sshpass\" existiert nicht. Bitte installieren Sie das entsprechende Paket über ihren Paketmanager."
+      exit 1
+    fi
+    SSHPASS="$password" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
+  else
+    echo "Verbindungsaufbau mit Sockel ${control_path} zu ${target}"
+    ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
+  fi
+  return $?
+}
 
+function is_ssh_socket_alive {
+  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
+  ssh -o ControlPath="${SSH_SOCKET_PATH}" -O check "${REMOTE_HOST}" 2>/dev/null
+  return $?
+}
+
+function connect_ssh {
+  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
+  if [ -z "${REMOTE_HOST}" ]; then
+    echo "Fehler: Kein Remote-Host angegeben."
+    exit 1
+  fi
+  if is_ssh_socket_alive; then
+    echo "SSH-Verbindung zu ${REMOTE_HOST} besteht bereits."
+    return 0
+  fi
+  output=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_HOST} true 2>&1)
+  if [[ $? -eq 0 ]]; then
+    echo "Passwortloser Verbindungsaufbau war erfolgreich."
+    establish_ssh_connection "${REMOTE_HOST}" "${SSH_SOCKET_PATH}"
+  elif echo "$output" | grep -q "Permission denied"; then
+    echo "Host ist erreichbar, aber passwortlose Authentifizierung fehlgeschlagen."
+    echo -n "Bitte geben Sie das SSH-Passwort für ${REMOTE_HOST} ein: "
+    read -s USER_PASSWORD
+    echo
+    establish_ssh_connection "${REMOTE_HOST}" "${SSH_SOCKET_PATH}" "$USER_PASSWORD"
+    if [ $? -ne 0 ]; then
+      echo "Verbindung zu ${REMOTE_HOST} konnte nicht hergestellt werden."
+      exit 1
+    fi
+  else
+    echo "Unbekannter Fehler oder Host nicht erreichbar. Ausgabe:"
+    echo "$output"
+  fi
+  echo "SSH-Verbindung zu ${REMOTE_HOST} wurde erfolgreich aufgebaut."
+}
+
+function execute_remote_command {
+  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
+  local command=$1
+  if [ -z "${command}" ]; then
+    echo "Fehler: Kein Befehl zum Ausführen angegeben."
+    return 1
+  fi
+  ssh -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "${command}"
+  return $?
+}
+
+function execute_remote_background_command {
+  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
+  local command=$1
+  if [ -z "${command}" ]; then
+    echo "Fehler: Kein Befehl zum Ausführen angegeben."
+    return 1
+  fi
+  ssh -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "nohup sh -c \"${command}\" > /tmp/ddpar.log 2>&1 &"
+}
+
+function close_ssh_connection {
+  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
+  ssh -S "${SSH_SOCKET_PATH}" -O exit "${REMOTE_HOST}"
+  if [ $? -ne 0 ]; then
+    echo "Warnung: Fehler beim Schließen der SSH-Verbindung zu ${REMOTE_HOST}."
+  fi
+}
+
+function remote_port_generation {
+  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
+  REMOTE_PORT=$(( RANDOM % 55001 ))
+  REMOTE_PORT=$(( REMOTE_PORT + 10000 ))
+}
+
+function check_remote_port_availability {
+  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
+  execute_remote_command "ss -tln | grep -q \":${CURRENT_REMOTE_PORT}\""
+  if [[ $? != 0 ]]; then
+    return 0
+  else
+    [ "$DEBUG" -eq 1 ] && echo "Port ${CURRENT_REMOTE_PORT} bereits in Benutzung."
+    return 1
+  fi
+}
+
+function remote_restore_commands {
+  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
+  # Startet auf dem Remote-Host einen netcat-Sender, der die übergebene Quelle
+  # (z.B. "dd if=...part") an den verbindenden lokalen Client liefert. Der
+  # Port für die lokale Empfängerseite steht anschließend in CURRENT_REMOTE_PORT.
+  local remote_input_cmd=$1
+
+  if [ -z "${REMOTE_PORT}" ]; then
+    remote_port_generation
+  fi
+  CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
+  while true; do
+    if check_remote_port_availability; then
+      break
+    else
+      echo "Port ${CURRENT_REMOTE_PORT} on remote machine already in use, generate new port."
+      remote_port_generation
+      CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
+    fi
+  done
+
+  echo "REMOTE COMMAND: ${remote_input_cmd} | nc -N -l ${CURRENT_REMOTE_PORT}"
+  execute_remote_background_command "${remote_input_cmd} | nc -N -l ${CURRENT_REMOTE_PORT}"
+  REMOTE_LISTENER_PORTS+=("${CURRENT_REMOTE_PORT}")
+
+  MAX_ATTEMPTS=3
+  SLEEP_INTERVAL=1
+  ATTEMPT=1
+  while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+    echo "Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)..."
+    if execute_remote_command "ss -tuln | grep -q :${CURRENT_REMOTE_PORT}"; then
+      echo "Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop."
+      break
+    else
+      echo "Process not found on port ${CURRENT_REMOTE_PORT}."
+    fi
+    ATTEMPT=$((ATTEMPT + 1))
+    if [ $ATTEMPT -le $MAX_ATTEMPTS ]; then
+      sleep $SLEEP_INTERVAL
+    fi
+  done
+  if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+    echo "Process did not start on port ${CURRENT_REMOTE_PORT} after $MAX_ATTEMPTS attempts."
+    return 1
+  fi
+}
+
+# Verwaltung der parallelen Hintergrund-Jobs:
+# Jeder gestartete Teil-Job wird mit PID und Beschreibung registriert, damit
+# wait_for_jobs die Exit-Codes einzeln einsammeln kann. Ein nacktes "wait"
+# würde Fehler einzelner Restore-Pipelines verschlucken.
+JOB_PIDS=()
+JOB_LABELS=()
+REMOTE_LISTENER_PORTS=()
+
+function register_job {
+  JOB_PIDS+=("$1")
+  JOB_LABELS+=("$2")
+}
+
+function wait_for_jobs {
+  local failed=0
+  local i rc
+  for i in "${!JOB_PIDS[@]}"; do
+    wait "${JOB_PIDS[$i]}"
+    rc=$?
+    if [ $rc -ne 0 ]; then
+      echo "Fehler: ${JOB_LABELS[$i]} ist mit Exit-Code ${rc} fehlgeschlagen."
+      failed=$((failed + 1))
+    fi
+  done
+  JOB_PIDS=()
+  JOB_LABELS=()
+  if [ $failed -gt 0 ]; then
+    echo "Fehler: ${failed} parallele(r) Job(s) fehlgeschlagen. Die Wiederherstellung ist unvollständig!"
+    INTERNAL_EXITCODE=1
+    return 1
+  fi
+  echo "Alle parallelen Jobs erfolgreich beendet."
+  return 0
+}
+
+function cleanup_on_signal {
+  trap - INT TERM
+  echo "Abbruch: Beende laufende Teil-Prozesse ..." >&2
+  local pids port
+  pids=$(jobs -p)
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086 # PIDs sind whitespace-getrennt gewollt
+    kill $pids 2>/dev/null
+    wait $pids 2>/dev/null
+  fi
+  if [ $REMOTE -eq 1 ] && is_ssh_socket_alive; then
+    for port in "${REMOTE_LISTENER_PORTS[@]}"; do
+      execute_remote_command "pkill -f 'nc -N -l ${port}'" 2>/dev/null
+    done
+    close_ssh_connection
+  fi
+  exit 130
+}
+trap cleanup_on_signal INT TERM
+
+function part_bytes {
+  # Bytes, die Teil $1 enthält: normale Teile SPLIT_SIZE, der letzte Teil
+  # zusätzlich den nicht gleichmäßig verteilbaren Rest; bei Backups kleiner
+  # als NUM_JOBS Blöcke ggf. weniger oder 0.
+  local part=$1
+  local start=$((part * SPLIT_SIZE))
+  local remaining=$((INPUT_SIZE - start))
+  if [ "${remaining}" -le 0 ]; then
+    echo 0
+  elif [ "${part}" -eq $((NUM_JOBS - 1)) ] || [ "${remaining}" -lt "${SPLIT_SIZE}" ]; then
+    echo "${remaining}"
+  else
+    echo "${SPLIT_SIZE}"
+  fi
+}
+
+function restore_split_image {
   echo "Starte die Prozesse ..."
-  for ((PART_NUM=0; PART_NUM<${NUM_JOBS}; PART_NUM++)); do
-    # Build individual subcommands and concatinate, if enabled
-    if [ ! -z "$COMPRESSION" ]; then
+  if [[ ${OUTPUT_FILE_TYPE} != "block special"* ]]; then
+    echo "fallocate -l ${INPUT_SIZE} $OUTPUT_FILE"
+    if ! fallocate -l "${INPUT_SIZE}" "${OUTPUT_FILE}"; then
+      echo "Fehler: Speicherplatz für ${OUTPUT_FILE} konnte nicht reserviert werden (fallocate)."
+      INTERNAL_EXITCODE=1
+      return 1
+    fi
+  fi
+
+  local PART_NUM START COUNT_BYTES
+  local dd_out
+  for ((PART_NUM=0; PART_NUM<NUM_JOBS; PART_NUM++)); do
+    START=$((PART_NUM * SPLIT_SIZE))
+    COUNT_BYTES=$(part_bytes "${PART_NUM}")
+    # Byte-genaue dd-Aufrufe (count_bytes/seek_bytes), damit auch nicht glatt
+    # teilbare Backups funktionieren. Direkte Pipelines statt eval-Strings:
+    # Pfade mit Leerzeichen o.ä. sind so ungefährlich.
+    dd_out=(dd of="${OUTPUT_FILE}" bs="${BLOCKSIZEBYTES}" iflag=fullblock,count_bytes count="${COUNT_BYTES}" oflag=seek_bytes seek="${START}" conv=notrunc)
+    if [ $REMOTE -eq 1 ]; then
+      # Remote netcat restore, unkomprimiert: Remote sendet, lokal wird empfangen und geschrieben
+      if [ $PART_NUM -eq 0 ]; then
+        echo "Source is remote (uncompressed)"
+      fi
+      if ! remote_restore_commands "dd if=\"${INPUT_FILES}${PART_NUM}.part\" bs=${BLOCKSIZEBYTES} iflag=fullblock"; then
+        echo "Remote-Restore-Sender für Teil ${PART_NUM} konnte nicht gestartet werden."
+        break
+      fi
+      echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | ${dd_out[*]}"
+      nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" </dev/null | "${dd_out[@]}" &
+    elif [ ! -z "$COMPRESSION" ]; then
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is compressed"
       fi
-      INPUT_CMD="zcat ${INPUT_FILES}${PART_NUM}.gz"
+      echo "zcat ${INPUT_FILES}${PART_NUM}.gz | ${dd_out[*]}"
+      zcat "${INPUT_FILES}${PART_NUM}.gz" | "${dd_out[@]}" &
     else
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is uncompressed"
       fi
-      INPUT_CMD="dd if=${INPUT_FILES}${PART_NUM}.part bs=${BLOCKSIZEBYTES} iflag=fullblock"
+      echo "dd if=${INPUT_FILES}${PART_NUM}.part bs=${BLOCKSIZEBYTES} iflag=fullblock | ${dd_out[*]}"
+      dd if="${INPUT_FILES}${PART_NUM}.part" bs="${BLOCKSIZEBYTES}" iflag=fullblock | "${dd_out[@]}" &
     fi
-    START=$((PART_NUM * SPLIT_SIZE))
-    FULL_CMD="${INPUT_CMD}"
-    OUTPUT_CMD="dd of=${OUTPUT_FILE} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / ${BLOCKSIZEBYTES})) seek=$((START / ${BLOCKSIZEBYTES})) iflag=fullblock"
-    FULL_CMD="${FULL_CMD} | $OUTPUT_CMD &"
-    if [[ ${OUTPUT_FILE_TYPE} != "block special"* ]]; then
-      #touch $OUTPUT_FILE
-      echo "fallocate -l ${INPUT_SIZE} $OUTPUT_FILE"
-      fallocate -l ${INPUT_SIZE} $OUTPUT_FILE
-    fi
-    echo "$FULL_CMD"
-    eval "${FULL_CMD}"
+    register_job $! "Teil ${PART_NUM} (restore)"
   done
 }
 
@@ -77,19 +335,40 @@ INPUT_FILES="${INPUT_PATH}/${INPUT_FILE_BASENAME}-"
 OUTPUT_FILE_TYPE="$(file -b $OUTPUT)"
 METADATA_FILE="${INPUT_FILES}metadata.txt"
 
-# Get parameters from metadata file
-if [ ! -e "$METADATA_FILE" ]; then
-  echo "Die Datei existiert $METADATA_FILE nicht."
+# Get parameters from metadata file (lokal oder remote)
+if [ $REMOTE -eq 1 ]; then
+  connect_ssh
+  METADATA_SRC=$(mktemp)
+  execute_remote_command "cat \"$METADATA_FILE\"" > "$METADATA_SRC" 2>/dev/null
+  if [ ! -s "$METADATA_SRC" ]; then
+    echo "Die Metadatendatei $METADATA_FILE auf $REMOTE_HOST existiert nicht oder ist leer."
+    rm -f "$METADATA_SRC"
+    close_ssh_connection
+    exit 1
+  fi
+else
+  METADATA_SRC="$METADATA_FILE"
+  if [ ! -e "$METADATA_SRC" ]; then
+    echo "Die Datei existiert $METADATA_FILE nicht."
+    exit 1
+  fi
+fi
+NUM_JOBS=$(grep "^NUM_JOBS=" "$METADATA_SRC" | cut -d "=" -f 2)
+FILE_NAME=$(grep "^FILE_NAME=" "$METADATA_SRC" | cut -d "=" -f 2)
+SPLIT_SIZE=$(grep "^SPLIT_SIZE=" "$METADATA_SRC" | cut -d "=" -f 2)
+INPUT_SIZE=$(grep "^INPUT_SIZE=" "$METADATA_SRC" | cut -d "=" -f 2)
+INPUT_FILE_TYPE=$(grep "^FILE_TYPE=" "$METADATA_SRC" | cut -d "=" -f 2)
+BLOCKSIZEBYTES=$(grep "^BLOCKSIZEBYTES=" "$METADATA_SRC" | cut -d "=" -f 2)
+COMPRESSION=$(grep "^COMPRESSION=" "$METADATA_SRC" | cut -d "=" -f 2)
+COMPRESSION_LEVEL=$(grep "^COMPRESSION_LEVEL=" "$METADATA_SRC" | cut -d "=" -f 2)
+
+# Remote-Restore unterstützt derzeit nur unkomprimierte Backups (netcat, uncompressed)
+if [ $REMOTE -eq 1 ] && [ ! -z "$COMPRESSION" ]; then
+  echo "Remote-Restore unterstützt derzeit nur unkomprimierte Backups (netcat, uncompressed)."
+  rm -f "$METADATA_SRC"
+  close_ssh_connection
   exit 1
 fi
-NUM_JOBS=$(grep "NUM_JOBS" $METADATA_FILE | cut -d "=" -f 2)
-FILE_NAME=$(grep "FILE_NAME" $METADATA_FILE | cut -d "=" -f 2)
-SPLIT_SIZE=$(grep "SPLIT_SIZE" $METADATA_FILE | cut -d "=" -f 2)
-INPUT_SIZE=$(grep "INPUT_SIZE" $METADATA_FILE | cut -d "=" -f 2)
-INPUT_FILE_TYPE=$(grep "FILE_TYPE" $METADATA_FILE | cut -d "=" -f 2)
-BLOCKSIZEBYTES=$(grep "BLOCKSIZEBYTES" $METADATA_FILE | cut -d "=" -f 2)
-COMPRESSION=$(grep "COMPRESSION" $METADATA_FILE | cut -d "=" -f 2)
-COMPRESSION_LEVEL=$(grep "COMPRESSION_LEVEL" $METADATA_FILE | cut -d "=" -f 2)
 
 # Überprüfung der erforderlichen Parameter
 if [ -z "$INPUT_PATH" ] || [ -z "$INPUT_FILE_BASENAME" ] || [ -z "$OUTPUT" ]; then
@@ -149,24 +428,33 @@ else
 fi
 
 echo "Nachfolgend werden die geteilten Dateien unter $INPUT_PATH/$INPUT_FILE_BASENAME nach $OUTPUT_FILE geschrieben."
-while true; do
-  read -p "Möchten Sie fortfahren [y/N]? " choice
-  case "$choice" in
-    y|Y)
-      echo "Beginning to restore ..."
-      restore_split_image
-      break
-      ;;
-    n|N|"")
-      echo "Abbruch."
-      # Fügen Sie hier den Code hinzu, der bei "Nein" ausgeführt werden soll
-      exit 0
-      ;;
-    *)
-      echo "Ungültige Eingabe. Bitte wählen Sie 'y' oder 'N'."
-      ;;
-  esac
-done
+if [ "$ASSUME_YES" -eq 1 ]; then
+  echo "Sicherheitsabfrage übersprungen (-y). Beginning to restore ..."
+  restore_split_image
+else
+  while true; do
+    read -p "Möchten Sie fortfahren [y/N]? " choice
+    case "$choice" in
+      y|Y)
+        echo "Beginning to restore ..."
+        restore_split_image
+        break
+        ;;
+      n|N|"")
+        echo "Abbruch."
+        # Fügen Sie hier den Code hinzu, der bei "Nein" ausgeführt werden soll
+        if [ $REMOTE -eq 1 ]; then
+          rm -f "$METADATA_SRC"
+          close_ssh_connection
+        fi
+        exit 0
+        ;;
+      *)
+        echo "Ungültige Eingabe. Bitte wählen Sie 'y' oder 'N'."
+        ;;
+    esac
+  done
+fi
 
 #if [[ "$INPUT_FILE_TYPE" == "block special"* ]] && [[ "$OUTPUT_FILE_TYPE" == "block special"* ]]; then
 #  echo "Beginning to restore ..."
@@ -180,5 +468,11 @@ done
 #else
 #  echo "Input File Type ($INPUT_FILE_TYPE) stimmt nicht mit Output File Type ($OUTPUT_FILE_TYPE) überein."
 #fi
-wait
+wait_for_jobs
 
+if [ $REMOTE -eq 1 ]; then
+  rm -f "$METADATA_SRC"
+  close_ssh_connection
+fi
+
+exit ${INTERNAL_EXITCODE}

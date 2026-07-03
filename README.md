@@ -1,14 +1,108 @@
 # ddpar
-Attempting scripted parallel dd execution.
 
-## Usecases
-### local
-#### uncrompressed
+**dd parallel** — Bash-Skripte zum parallelen Klonen, Sichern und
+Wiederherstellen von Blockgeräten und großen Dateien mit `dd`.
+
+Die Eingabe wird in gleich große Segmente geteilt, die gleichzeitig von
+mehreren `dd`-Prozessen verarbeitet werden. Beliebige Eingabegrößen werden
+unterstützt: Ein nicht gleichmäßig verteilbarer Rest wird vom letzten Teil
+übertragen. Übertragung auf einen Remote-Host ist per SSH + netcat möglich.
+
+| Skript | Aufgabe |
+|---|---|
+| `ddpar.sh` | Klonen (`-m clone`, Default) oder Sichern (`-m backup`), lokal und remote |
+| `ddpar-restore.sh` | Wiederherstellen eines mit `ddpar.sh -m backup` erstellten Backups |
+| `ddpar-check.sh` | Integritätsprüfung via SHA256 (Quelle↔Backup, Backup↔Ziel oder Quelle↔Ziel) |
+
+## Voraussetzungen
+
+- Bash, GNU coreutils (`dd` mit `count_bytes`/`skip_bytes`/`seek_bytes`), `file`, `blockdev`
+- `gzip` (bei Kompression), `sha256sum` (bei Checksummen)
+- Für Remote-Betrieb: `ssh`, `nc` (netcat-openbsd), `ss`; optional `sshpass` für Passwort-Login
+
+## Schnellstart
+
+```bash
+# Backup einer Platte in 4 parallelen Teilen, mit Checksummen (-s)
+./ddpar.sh -i /dev/sdb -o /mnt/backup -m backup -s
+
+# Backup komprimiert (-c)
+./ddpar.sh -i /dev/sdb -o /mnt/backup -m backup -s -c
+
+# Backup gegen die Quelle prüfen
+./ddpar-check.sh -s /dev/sdb -b /mnt/backup/sdb
+
+# Wiederherstellen (Jobs/Blockgröße kommen aus der Metadatendatei)
+./ddpar-restore.sh -i /mnt/backup/sdb -o /dev/sdc
+
+# Wiederhergestelltes Ziel gegen das Backup prüfen
+./ddpar-check.sh -b /mnt/backup/sdb -d /dev/sdc
+
+# Klonen Gerät -> Gerät mit 8 Jobs
+./ddpar.sh -i /dev/sdb -o /dev/sdc -j 8
+
+# Clone prüfen (ohne Backup-Metadaten: -j/-B wie beim Clone angeben)
+./ddpar-check.sh -s /dev/sdb -d /dev/sdc -j 8
+```
+
+`./ddpar.sh -h`, `./ddpar-restore.sh -h` und `./ddpar-check.sh -h` zeigen alle Optionen.
+
+### Remote (SSH + netcat)
+
+```bash
+# Clone auf einen Remote-Host: Daten laufen unverschlüsselt über netcat
+./ddpar.sh -i /dev/sdb -o /dev/sdc -r n -R user@zielhost
+
+# Remote-Backup und -Restore (unkomprimiert)
+./ddpar.sh -i /dev/sdb -o /remote/backup -m backup -r n -R user@zielhost
+./ddpar-restore.sh -i /remote/backup/sdb -o /dev/sdc -r n -R user@zielhost
+
+# Remote-Check (nur SHA256-Hashes laufen über SSH)
+./ddpar-check.sh -s /dev/sdb -b /remote/backup/sdb -r n -R user@zielhost
+```
+
+**Sicherheitshinweise zum Remote-Modus:**
+
+- Der Verbindungsaufbau und die Steuerung laufen über SSH, die **Nutzdaten im
+  Modus `n` jedoch unverschlüsselt über netcat**. Nur in vertrauenswürdigen
+  Netzen verwenden. Ein vollständig verschlüsselter Modus (`l`) ist geplant,
+  aber noch nicht implementiert.
+- Host-Keys werden mit `StrictHostKeyChecking=accept-new` behandelt: Unbekannte
+  Hosts werden beim Erstkontakt akzeptiert, ein **geänderter** Host-Key führt
+  zum Abbruch.
+- Passwörter (optional via `sshpass`) werden über die Umgebung übergeben und
+  tauchen nicht in der Prozessliste auf. Im Debug-Modus (`-d`) können
+  Passwörter im Klartext ausgegeben werden.
+
+## Exit-Codes
+
+Alle Skripte enden mit Exit-Code `0` nur, wenn sämtliche parallelen
+Teil-Prozesse erfolgreich waren. Schlägt ein Teil fehl (z.B. Lesefehler,
+volle Platte, abgerissene Verbindung) oder meldet `ddpar-check.sh` eine
+Abweichung, ist der Exit-Code `!= 0` — damit sind die Skripte in eigenen
+Automatisierungen/CI verwendbar.
+
+## Tests und Entwicklung
+
+```bash
+make install-deps      # shellcheck, bats, netcat (Debian/Ubuntu)
+make check             # ShellCheck-Gate + bats-Testsuite
+make test-integration  # Blockgerät- (root) und Remote-Tests (SSH)
+```
+
+Details: [tests/README.md](tests/README.md), [TESTING.md](TESTING.md) (manuelle
+Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
+[ARCHITECTURE.md](ARCHITECTURE.md) (Design).
+
+## Funktionsstatus
+
+### Lokal
+#### uncompressed
 
 | | clone (check) || backup (check) | restore (check) |
 |----------|----------|-|----------|----------|
-| block dev | :heavy_check_mark: (:stop_sign:) || :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
-| file | :heavy_check_mark: (:stop_sign:) || :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
+| block dev | :heavy_check_mark: (:heavy_check_mark:) || :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
+| file | :heavy_check_mark: (:heavy_check_mark:) || :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 
 #### compressed
 | | backup gzip (check) | restore gzip (check) |
@@ -18,8 +112,8 @@ Attempting scripted parallel dd execution.
 
 <br>
 
-### remote - ssh
-#### general remote funcionality (ssh)
+### Remote — SSH
+#### general remote functionality (ssh)
 | |state|
 |-|-|
 | establish_ssh_connection | :heavy_check_mark: |
@@ -31,19 +125,17 @@ Attempting scripted parallel dd execution.
 | remote_port_generation | :heavy_check_mark: |
 | check_remote_port_availability | :heavy_check_mark: |
 | output_analysis | :heavy_check_mark: |
-| remote_cloning_commands | :gear: |
-| remote_backup_commands | :stop_sign: |
-
-
+| remote_cloning_commands | :heavy_check_mark: |
+| remote_backup_commands | :heavy_check_mark: |
 
 <br>
 
-### remote - netcat
-#### uncompressed 
+### Remote — netcat
+#### uncompressed
 | | clone (check) | | backup (check) | restore (check) |
 |-|----------|-|----------|----------|
-| block dev | :heavy_check_mark: (:stop_sign:) | | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
-| file | :heavy_check_mark: (:stop_sign:) | | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
+| block dev | :heavy_check_mark: (:heavy_check_mark:) | | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
+| file | :heavy_check_mark: (:heavy_check_mark:) | | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 
 #### local [de]compression
 | | backup gzip (check) | restore gzip (check) |
@@ -57,53 +149,25 @@ Attempting scripted parallel dd execution.
 | block dev | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
 | file | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
 
-#### compressed transfer (compression+decompresion before and after transfer)
+#### compressed transfer (compression+decompression before and after transfer)
 | | clone |
 |----------|----------|
 | block dev | :stop_sign: |
 | file | :stop_sign: |
 
-<br>
-<!--
-### remote - ???
-#### uncompressed 
-| | clone | | backup (check) | restore (check) |
-|-|----------|-|----------|----------|
-| block dev | :stop_sign: (:stop_sign:) | | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
-| file | :stop_sign: (:stop_sign:) | | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
-#### local [de]compression
-| | backup gzip (check) | restore gzip (check) |
-|-|----------|----------|
-| block dev | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
-| file | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
-#### remote [de]compression
-| | backup gzip (check) | restore gzip (check) |
-|-----------|----------|----------|
-| block dev | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
-| file | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
-#### compressed transfer (compression+decompresion before and after transfer)
-| | clone |
-|----------|----------|
-| block dev | :stop_sign: (:stop_sign:) |
-| file | :stop_sign: (:stop_sign:) |
--->
-
 ## To Do
-- check read/write permissions for $SOURCE, $BACKUP_BASE and $DESTINATION
+
+- Lese-/Schreibrechte für `$SOURCE`, `$BACKUP_BASE` und `$DESTINATION` vorab prüfen
 - ddpar.sh:
-  - Add option to give a backup a custom BASE_NAME
-  - Add size check for local clone_file
-  - Remove deprecated functions (currently none)
+  - Option für einen eigenen `BASE_NAME` eines Backups
+  - Checksummen/Kompression auch im Clone-Modus (analog Backup-Modus)
 - ddpar-check.sh:
-  - Add if-statement for checking if a backup as been created with a sha256sum
+  - Prüfen, ob ein Backup überhaupt mit sha256-Dateien erstellt wurde, bevor verglichen wird
 - ddpar-restore.sh:
-  - check on file restore, if output is a file. If directory given, append basename from metadata
-  - fallocate is run multiple times? (maybe only on restoring compressed block dev images?)
-  - make fallocate optional
-- use this BASE_NAME as path for checksum files for clones (where user request checksuming)
-- echo a message if no reasonable alternative number of threads/jobs could be calculated
-- when compressing an image and option -c (checksum) is given, should the script calculate the checksum of both, the raw file and the compressed file? (Currently only basefile's checksum is calculated.)
-- Code to make missing features work
+  - Bei Datei-Restore prüfen, ob das Ziel eine Datei ist; bei Verzeichnis den Basename aus den Metadaten anhängen
+  - `fallocate` optional machen
+- `BASE_NAME` als Pfad für Checksummen-Dateien von Clones nutzen (wenn Checksummen angefordert)
+- Kompression + `-s`: Checksumme optional auch für die komprimierten Dateien berechnen (derzeit nur für die Rohdaten)
 - Remoting:
-  - Use differnt functions for remote actions like "output analysis" or implement in the existing functions?
-  - Make remote input and local output work (not yet thought through)
+  - Verschlüsselter Datenkanal (`-r l`) und Remote-Kompression (`-r c`)
+  - Remote-Eingabe mit lokaler Ausgabe (noch nicht durchdacht)

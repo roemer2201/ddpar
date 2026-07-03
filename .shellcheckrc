@@ -1,0 +1,11 @@
+# ShellCheck-Konfiguration für ddpar
+shell=bash
+
+# SC2034: Variable assigned but not used
+# Wird für Farbvariablen (NOCOLOR, INFOCOLOR etc.) ignoriert,
+# da sie nur gesetzt werden wenn das Terminal Farben unterstützt.
+disable=SC2034
+
+# SC2207: Prefer mapfile or read -a to split command output into array
+# Wird vorerst ignoriert, da die betroffenen Stellen keine Arrays benötigen.
+disable=SC2207
