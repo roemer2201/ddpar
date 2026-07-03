@@ -462,100 +462,7 @@ function clone_file {
     fi
 
     echo -e "${SUCCESSCOLOR}Starting file cloning processes ...${NOCOLOR}"
-    for ((PART_NUM=0; PART_NUM<${NUM_JOBS}; PART_NUM++)); do
-    
-        # Build individual subcommands and concatinate, if enabled
-        START=$((PART_NUM * SPLIT_SIZE))
-        INPUT_CMD="dd if=${INPUT} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / ${BLOCKSIZEBYTES})) skip=$((START / ${BLOCKSIZEBYTES}))"
-        FULL_CMD="${INPUT_CMD}"
-    
-        OUTPUT_CMD="dd of=${OUTPUT_PATH} bs=${BLOCKSIZEBYTES} seek=$((START / ${BLOCKSIZEBYTES}))"
-    
-        # ToDo: create Metadata directory and write Checksum-Files
-        #if [ $CHECKSUM -eq 1 ]; then
-        #  CHECKSUM_CMD="tee >(sha256sum > ${OUTPUT_FILE}${PART_NUM}.sha256)"
-        #  FULL_CMD="${FULL_CMD} | $CHECKSUM_CMD"
-        #fi
-        # ToDo: Compression only makes sense when transfering to remote location, implement later (this is just a copy from backup mode)
-        #if [ $COMPRESSION -eq 1 ]; then
-        #    if [ $PART_NUM -eq 0 ]; then
-        #        #echo "Compression is enabled with \$COMPRESSION_LEVEL ${COMPRESSION_LEVEL}"
-        #        # Append compression and its level to metadata file
-        #        echo "COMPRESSION=${COMPRESSION}" >> ${METADATA_FILE}
-        #        echo "COMPRESSION_LEVEL=${COMPRESSION_LEVEL}" >> ${METADATA_FILE}
-        #    fi
-        #    COMPRESSION_CMD="gzip -${COMPRESSION_LEVEL} > ${OUTPUT_FILE}${PART_NUM}.gz"
-        #    FULL_CMD="${FULL_CMD} | $COMPRESSION_CMD &"
-        #else
-        #    OUTPUT_CMD="dd of=${OUTPUT_FILE}${PART_NUM}.part bs=${BLOCKSIZEBYTES}"
-        #    FULL_CMD="${FULL_CMD} | $OUTPUT_CMD &"
-        #fi
-        
-        if [ $REMOTE -eq 1 ]; then
-            # Generate and check remote ports
-            if [ -z "${REMOTE_PORT}" ]; then
-                remote_port_generation
-            fi
-			CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
-            # Schleife zum Generieren eines freien Ports
-            while true; do
-                if check_remote_port_availability; then
-                    break
-                else
-                    echo -e "${INFOCOLOR}Port ${CURRENT_REMOTE_PORT} on remote machine already in use, generate new port.${NOCOLOR}"
-                    remote_port_generation
-                    CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
-                fi
-            done
-
-            echo -e "${INFOCOLOR}REMOTE COMMAND: nc -N -l ${CURRENT_REMOTE_PORT} | ${OUTPUT_CMD}${NOCOLOR}"
-            execute_remote_background_command "nc -N -l ${CURRENT_REMOTE_PORT} | ${OUTPUT_CMD}"
-            REMOTE_LISTENER_PORTS+=("${CURRENT_REMOTE_PORT}")
-			
-			# Check if execute_remote_background_command is running
-			MAX_ATTEMPTS=3 # Anzahl der maximalen Versuche
-			SLEEP_INTERVAL=1 # Wartezeit zwischen den Versuchen in Sekunden
-			ATTEMPT=1	# Zähler für die aktuellen Versuche
-			
-			# Schleife, die den Status des Ports überprüft
-			while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-				echo -e "${INFOCOLOR}Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)...${NOCOLOR}"
-				
-				# Remote-Befehl zum Prüfen, ob der Prozess auf dem Port läuft
-				if execute_remote_command "ss -tln | grep -qE :${CURRENT_REMOTE_PORT}[^0-9]"; then
-					echo -e "${INFOCOLOR}Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop.${NOCOLOR}"
-					break
-				else
-					echo -e "${INFOCOLOR}Process not found on port ${CURRENT_REMOTE_PORT}.${NOCOLOR}"
-				fi
-			
-				# Erhöhe den Versuchszähler
-				ATTEMPT=$((ATTEMPT + 1))
-			
-				# Warte eine Sekunde vor dem nächsten Versuch, falls es noch Versuche gibt
-				if [ $ATTEMPT -le $MAX_ATTEMPTS ]; then
-					sleep $SLEEP_INTERVAL
-				fi
-			done
-			
-			# Wenn nach allen Versuchen der Prozess nicht gefunden wurde, mit Fehler beenden
-			if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-				echo -e "${INFOCOLOR}Process did not start on port ${CURRENT_REMOTE_PORT} after $MAX_ATTEMPTS attempts."
-				INTERNAL_EXITCODE=2
-				return 1
-			fi
-
-            INPUT_CMD_REMOTE_EXTENSION="nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}"
-            FULL_CMD="${FULL_CMD} | ${INPUT_CMD_REMOTE_EXTENSION} &"
-        else
-            FULL_CMD="${FULL_CMD} | ${OUTPUT_CMD} &"
-        fi
-
-        echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
-        eval "${FULL_CMD}"
-        register_job $! "Teil ${PART_NUM} (clone_file)"
-
-    done
+    run_clone_parts "${OUTPUT_PATH}"
 }
 
 function clone_block {
@@ -579,98 +486,39 @@ function clone_block {
     fi
     echo -e "${SUCCESSCOLOR}Klonvorgang kann durchgeführt werden.${NOCOLOR}"
     echo -e "${SUCCESSCOLOR}Starte die Prozesse ...${NOCOLOR}"
-    for ((PART_NUM=0; PART_NUM<${NUM_JOBS}; PART_NUM++)); do
+    run_clone_parts "${OUTPUT}"
+}
+
+function run_clone_parts {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	# Startet die parallelen dd-Teil-Prozesse eines Clone-Vorgangs.
+	# $1 = Ausgabeziel (Datei oder Blockgerät); bei REMOTE=1 wird pro Teil
+	# ein nc-Listener auf dem Remote-Host eingerichtet.
+	# ToDo: Checksum/Kompression für Clone analog zum Backup-Modus umsetzen.
+	local output_target=$1
+	local PART_NUM START INPUT_CMD OUTPUT_CMD FULL_CMD
+
+	for ((PART_NUM=0; PART_NUM<NUM_JOBS; PART_NUM++)); do
 		# Build individual subcommands and concatinate, if enabled
 		START=$((PART_NUM * SPLIT_SIZE))
-		INPUT_CMD="dd if=${INPUT} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / ${BLOCKSIZEBYTES})) skip=$((START / ${BLOCKSIZEBYTES}))"
+		INPUT_CMD="dd if=${INPUT} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES))"
+		OUTPUT_CMD="dd of=${output_target} bs=${BLOCKSIZEBYTES} seek=$((START / BLOCKSIZEBYTES))"
 		FULL_CMD="${INPUT_CMD}"
-		
-		# ToDo: create Metadata directory and write Checksum-Files
-		#if [ $CHECKSUM -eq 1 ]; then
-		#  CHECKSUM_CMD="tee >(sha256sum > ${OUTPUT_FILE}${PART_NUM}.sha256)"
-		#  FULL_CMD="${FULL_CMD} | $CHECKSUM_CMD"
-		#fi
-		# ToDo: Compression only makes sense when transfering to remote location, implement later (this is just a copy from backup mode)
-		#if [ $COMPRESSION -eq 1 ]; then
-		#    if [ $PART_NUM -eq 0 ]; then
-		#        #echo "Compression is enabled with \$COMPRESSION_LEVEL ${COMPRESSION_LEVEL}"
-		#        # Append compression and its level to metadata file
-		#        echo "COMPRESSION=${COMPRESSION}" >> ${METADATA_FILE}
-		#        echo "COMPRESSION_LEVEL=${COMPRESSION_LEVEL}" >> ${METADATA_FILE}
-		#    fi
-		#    COMPRESSION_CMD="gzip -${COMPRESSION_LEVEL} > ${OUTPUT_FILE}${PART_NUM}.gz"
-		#    FULL_CMD="${FULL_CMD} | $COMPRESSION_CMD &"
-		#else
-		#    OUTPUT_CMD="dd of=${OUTPUT_FILE}${PART_NUM}.part bs=${BLOCKSIZEBYTES}"
-		#    FULL_CMD="${FULL_CMD} | $OUTPUT_CMD &"
-		#fi
-		
-		OUTPUT_CMD="dd of=${OUTPUT} bs=${BLOCKSIZEBYTES} seek=$((START / ${BLOCKSIZEBYTES}))"
-		
-		if [ $REMOTE -eq 1 ]; then
-            # Generate and check remote ports
-            if [ -z "${REMOTE_PORT}" ]; then
-                remote_port_generation
-            fi
-			CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
-            # Schleife zum Generieren eines freien Ports
-            while true; do
-                if check_remote_port_availability; then
-                    break
-                else
-                    echo -e "${INFOCOLOR}Port ${CURRENT_REMOTE_PORT} on remote machine already in use, generate new port.${NOCOLOR}"
-                    remote_port_generation
-                    CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
-                fi
-            done
 
-            echo -e "${INFOCOLOR}REMOTE COMMAND: nc -N -l ${CURRENT_REMOTE_PORT} | ${OUTPUT_CMD}${NOCOLOR}"
-            execute_remote_background_command "nc -N -l ${CURRENT_REMOTE_PORT} | ${OUTPUT_CMD}"
-            REMOTE_LISTENER_PORTS+=("${CURRENT_REMOTE_PORT}")
-			
-			# Check if execute_remote_background_command is running
-			MAX_ATTEMPTS=3 # Anzahl der maximalen Versuche
-			SLEEP_INTERVAL=1 # Wartezeit zwischen den Versuchen in Sekunden
-			ATTEMPT=1	# Zähler für die aktuellen Versuche
-			
-			# Schleife, die den Status des Ports überprüft
-			while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-				echo -e "${INFOCOLOR}Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)...${NOCOLOR}"
-				
-				# Remote-Befehl zum Prüfen, ob der Prozess auf dem Port läuft
-				if execute_remote_command "ss -tln | grep -qE :${CURRENT_REMOTE_PORT}[^0-9]"; then
-					echo -e "${INFOCOLOR}Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop.${NOCOLOR}"
-					break
-				else
-					echo -e "${INFOCOLOR}Process not found on port ${CURRENT_REMOTE_PORT}.${NOCOLOR}"
-				fi
-			
-				# Erhöhe den Versuchszähler
-				ATTEMPT=$((ATTEMPT + 1))
-			
-				# Warte eine Sekunde vor dem nächsten Versuch, falls es noch Versuche gibt
-				if [ $ATTEMPT -le $MAX_ATTEMPTS ]; then
-					sleep $SLEEP_INTERVAL
-				fi
-			done
-			
-			# Wenn nach allen Versuchen der Prozess nicht gefunden wurde, mit Fehler beenden
-			if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-				echo -e "${INFOCOLOR}Process did not start on port ${CURRENT_REMOTE_PORT} after $MAX_ATTEMPTS attempts."
-				INTERNAL_EXITCODE=2
+		if [ $REMOTE -eq 1 ]; then
+			if ! setup_remote_listener "${OUTPUT_CMD}"; then
+				echo -e "${ERRORCOLOR}Remote-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				return 1
 			fi
+			FULL_CMD="${FULL_CMD} | ${INPUT_CMD_REMOTE_EXTENSION} &"
+		else
+			FULL_CMD="${FULL_CMD} | ${OUTPUT_CMD} &"
+		fi
 
-            INPUT_CMD_REMOTE_EXTENSION="nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}"
-            FULL_CMD="${FULL_CMD} | ${INPUT_CMD_REMOTE_EXTENSION} &"
-        else
-            FULL_CMD="${FULL_CMD} | ${OUTPUT_CMD} &"
-        fi
-		
 		echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
 		eval "${FULL_CMD}"
-		register_job $! "Teil ${PART_NUM} (clone_block)"
-    done
+		register_job $! "Teil ${PART_NUM} (clone)"
+	done
 }
 
 function append_metadata {
@@ -684,10 +532,11 @@ function append_metadata {
 	fi
 }
 
-function remote_backup_commands {
+function setup_remote_listener {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
 	# Richtet auf der Remote-Maschine einen netcat-Empfänger ein, der die
 	# übertragenen Daten in den übergebenen Befehl (z.B. "dd of=...") schreibt.
+	# Wird von Clone- und Backup-Modus gemeinsam genutzt.
 	# Setzt anschließend INPUT_CMD_REMOTE_EXTENSION für die lokale Senderseite.
 	local remote_output_cmd=$1
 
@@ -719,7 +568,7 @@ function remote_backup_commands {
 	# Schleife, die den Status des Ports überprüft
 	while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
 		echo -e "${INFOCOLOR}Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)...${NOCOLOR}"
-		if execute_remote_command "ss -tuln | grep -q :${CURRENT_REMOTE_PORT}"; then
+		if execute_remote_command "ss -tln | grep -qE :${CURRENT_REMOTE_PORT}[^0-9]"; then
 			echo -e "${INFOCOLOR}Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop.${NOCOLOR}"
 			break
 		else
@@ -739,6 +588,96 @@ function remote_backup_commands {
 	fi
 
 	INPUT_CMD_REMOTE_EXTENSION="nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}"
+}
+
+function backup_mode {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	# Sichert die Eingabe in NUM_JOBS Teil-Dateien (.part bzw. .gz) inklusive
+	# Metadatendatei. Bei REMOTE=1 landen die Teile per netcat auf dem Remote-Host.
+	if [[ "${OUTPUT_FILE_TYPE}" != *"directory"* ]]; then
+		echo -e "${ERRORCOLOR}Fehler: Ungültiger Ausgabe-Typ ${OUTPUT_FILE_TYPE}. Erforderlich: directory.${NOCOLOR}"
+		exit 1
+	fi
+	# Freier Speicher im Zielpfad analysieren (lokal; remote netcat backup ohne diese Pruefung)
+	if [ $REMOTE -ne 1 ]; then
+		FREE_SPACE=$(df -P -B 1 "${OUTPUT}" | awk 'NR==2 {print $4}')
+		if [ -z "$FORCE" ] && (( INPUT_SIZE > FREE_SPACE )); then
+			echo -e "${ERRORCOLOR}Fehler: Eingabegröße (${INPUT_SIZE}) überschreitet den verfügbaren Speicherplatz (${FREE_SPACE}).${NOCOLOR}"
+			exit 1
+		fi
+		if [ ! -z "$FORCE" ] && (( INPUT_SIZE > FREE_SPACE )); then
+			echo -e "${WARNCOLOR}Warnung: Eingabegröße (${INPUT_SIZE}) überschreitet den verfügbaren Speicherplatz (${FREE_SPACE}). Mit aktiver Komprimierung koennte es dennoch passen.${NOCOLOR}"
+		fi
+	fi
+
+	echo -e "${SUCCESSCOLOR}Führe die Backup-Aktion durch.${NOCOLOR}"
+
+	# generate further spinoff variables
+	INPUT_FILE_NAME=$(basename "${INPUT}")
+	OUTPUT_FILE_NAME=${INPUT_FILE_NAME}
+	OUTPUT_FILE="${OUTPUT}/${OUTPUT_FILE_NAME}-"
+	METADATA_FILE="${OUTPUT_FILE}metadata.txt"
+
+	# Write metadata file (lokal oder remote)
+	if [ $REMOTE -eq 1 ]; then
+		if execute_remote_command "[ -f \"${METADATA_FILE}\" ]"; then
+			echo "Metadatafile already exists, copying it to ${METADATA_FILE}.old"
+			execute_remote_command "cp -p \"${METADATA_FILE}\" \"${METADATA_FILE}.old\" && cat /dev/null > \"${METADATA_FILE}\""
+		fi
+	else
+		if [ -f ${METADATA_FILE} ]; then
+			echo "Metadatafile already exists, copying it to ${METADATA_FILE}.old"
+			cp -p ${METADATA_FILE} ${METADATA_FILE}.old
+			cat /dev/null > ${METADATA_FILE}
+		fi
+	fi
+
+	append_metadata "NUM_JOBS=${NUM_JOBS}"
+	append_metadata "FILE_NAME=${INPUT_FILE_NAME}"
+	append_metadata "BLOCKSIZEBYTES=${BLOCKSIZEBYTES}"
+	append_metadata "INPUT_SIZE=${INPUT_SIZE}"
+	append_metadata "INPUT_FILE_NAME=${INPUT_FILE_NAME}"
+	append_metadata "FILE_TYPE=${INPUT_FILE_TYPE}"
+	append_metadata "SPLIT_SIZE=${SPLIT_SIZE}"
+
+	local PART_NUM START INPUT_CMD OUTPUT_CMD FULL_CMD CHECKSUM_CMD COMPRESSION_CMD
+	echo -e "${INFOCOLOR}Starte die Prozesse ...${NOCOLOR}"
+	for ((PART_NUM=0; PART_NUM<NUM_JOBS; PART_NUM++)); do
+
+		# Build individual subcommands and concatinate, if enabled
+		START=$((PART_NUM * SPLIT_SIZE))
+		INPUT_CMD="dd if=${INPUT} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / BLOCKSIZEBYTES)) skip=$((START / BLOCKSIZEBYTES))"
+		FULL_CMD="${INPUT_CMD}"
+		if [ $REMOTE -eq 1 ]; then
+			# Remote netcat backup, unkomprimiert, ohne Checksumme
+			OUTPUT_CMD="dd of=${OUTPUT_FILE}${PART_NUM}.part bs=${BLOCKSIZEBYTES}"
+			if ! setup_remote_listener "${OUTPUT_CMD}"; then
+				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
+				break
+			fi
+			FULL_CMD="${FULL_CMD} | ${INPUT_CMD_REMOTE_EXTENSION} &"
+		else
+			if [ $CHECKSUM -eq 1 ]; then
+				CHECKSUM_CMD="tee >(sha256sum > ${OUTPUT_FILE}${PART_NUM}.sha256)"
+				FULL_CMD="${FULL_CMD} | $CHECKSUM_CMD"
+			fi
+			if [ $COMPRESSION -eq 1 ]; then
+				if [ $PART_NUM -eq 0 ]; then
+					# Append compression and its level to metadata file
+					append_metadata "COMPRESSION=${COMPRESSION}"
+					append_metadata "COMPRESSION_LEVEL=${COMPRESSION_LEVEL}"
+				fi
+				COMPRESSION_CMD="gzip -${COMPRESSION_LEVEL} > ${OUTPUT_FILE}${PART_NUM}.gz"
+				FULL_CMD="${FULL_CMD} | $COMPRESSION_CMD &"
+			else
+				OUTPUT_CMD="dd of=${OUTPUT_FILE}${PART_NUM}.part bs=${BLOCKSIZEBYTES}"
+				FULL_CMD="${FULL_CMD} | $OUTPUT_CMD &"
+			fi
+		fi
+		echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
+		eval "${FULL_CMD}"
+		register_job $! "Teil ${PART_NUM} (backup)"
+	done
 }
 
 # Verwaltung der parallelen Hintergrund-Jobs:
@@ -849,103 +788,7 @@ case $MODE in
         wait_for_jobs
         ;;
     "backup")
-        if [[ "${OUTPUT_FILE_TYPE}" != *"directory"* ]]; then
-            echo -e "${ERRORCOLOR}Fehler: Ungültiger Ausgabe-Typ ${OUTPUT_FILE_TYPE}. Erforderlich: directory.${NOCOLOR}"
-            # Hier kannst du den Code für den Fehlerfall des Ausgabe-Typs einfügen
-            exit 1
-        fi
-        # Freier Speicher im Zielpfad analysieren (lokal; remote netcat backup ohne diese Pruefung)
-        if [ $REMOTE -ne 1 ]; then
-            FREE_SPACE=$(df -P -B 1 "${OUTPUT}" | awk 'NR==2 {print $4}')
-            if [ -z "$FORCE" ] && (( INPUT_SIZE > FREE_SPACE )); then
-                echo -e "${ERRORCOLOR}Fehler: Eingabegröße (${INPUT_SIZE}) überschreitet den verfügbaren Speicherplatz (${FREE_SPACE}).${NOCOLOR}"
-                exit 1
-            fi
-            if [ ! -z "$FORCE" ] && (( INPUT_SIZE > FREE_SPACE )); then
-                echo -e "${WARNCOLOR}Warnung: Eingabegröße (${INPUT_SIZE}) überschreitet den verfügbaren Speicherplatz (${FREE_SPACE}). Mit aktiver Komprimierung koennte es dennoch passen.${NOCOLOR}"
-            fi
-        fi
-
-        echo -e "${SUCCESSCOLOR}Führe die Backup-Aktion durch.${NOCOLOR}"
-
-        # generate further spinoff variables
-        INPUT_FILE_NAME=$(basename "${INPUT}")
-        OUTPUT_FILE_NAME=${INPUT_FILE_NAME}
-        OUTPUT_FILE="${OUTPUT}/${OUTPUT_FILE_NAME}-"
-        METADATA_FILE="${OUTPUT_FILE}metadata.txt"
-        
-        # Write metadata file (lokal oder remote)
-        if [ $REMOTE -eq 1 ]; then
-            if execute_remote_command "[ -f \"${METADATA_FILE}\" ]"; then
-                echo "Metadatafile already exists, copying it to ${METADATA_FILE}.old"
-                execute_remote_command "cp -p \"${METADATA_FILE}\" \"${METADATA_FILE}.old\" && cat /dev/null > \"${METADATA_FILE}\""
-            fi
-        else
-            if [ -f ${METADATA_FILE} ]; then
-                echo "Metadatafile already exists, copying it to ${METADATA_FILE}.old"
-                cp -p ${METADATA_FILE} ${METADATA_FILE}.old
-                cat /dev/null > ${METADATA_FILE}
-            fi
-        fi
-
-        append_metadata "NUM_JOBS=${NUM_JOBS}"
-        append_metadata "FILE_NAME=${INPUT_FILE_NAME}"
-        append_metadata "BLOCKSIZEBYTES=${BLOCKSIZEBYTES}"
-        append_metadata "INPUT_SIZE=${INPUT_SIZE}"
-        append_metadata "INPUT_FILE_NAME=${INPUT_FILE_NAME}"
-        append_metadata "FILE_TYPE=${INPUT_FILE_TYPE}"
-
-        # Write to metadata file
-        append_metadata "SPLIT_SIZE=${SPLIT_SIZE}"
-        
-        echo -e "${INFOCOLOR}Starte die Prozesse ...${NOCOLOR}"
-        for ((PART_NUM=0; PART_NUM<${NUM_JOBS}; PART_NUM++)); do
-
-        # Build individual subcommands and concatinate, if enabled
-        START=$((PART_NUM * SPLIT_SIZE))
-        INPUT_CMD="dd if=${INPUT} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / ${BLOCKSIZEBYTES})) skip=$((START / ${BLOCKSIZEBYTES}))"
-        FULL_CMD="${INPUT_CMD}"
-        if [ $REMOTE -eq 1 ]; then
-            # Remote netcat backup, unkomprimiert, ohne Checksumme
-            OUTPUT_CMD="dd of=${OUTPUT_FILE}${PART_NUM}.part bs=${BLOCKSIZEBYTES}"
-            if ! remote_backup_commands "${OUTPUT_CMD}"; then
-                echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
-                break
-            fi
-            FULL_CMD="${FULL_CMD} | ${INPUT_CMD_REMOTE_EXTENSION} &"
-        else
-            if [ $CHECKSUM -eq 1 ]; then
-              CHECKSUM_CMD="tee >(sha256sum > ${OUTPUT_FILE}${PART_NUM}.sha256)"
-              FULL_CMD="${FULL_CMD} | $CHECKSUM_CMD"
-            fi
-            if [ $COMPRESSION -eq 1 ]; then
-                if [ $PART_NUM -eq 0 ]; then
-                    #echo "Compression is enabled with \$COMPRESSION_LEVEL ${COMPRESSION_LEVEL}"
-                    # Append compression and its level to metadata file
-                    echo "COMPRESSION=${COMPRESSION}" >> ${METADATA_FILE}
-                    echo "COMPRESSION_LEVEL=${COMPRESSION_LEVEL}" >> ${METADATA_FILE}
-                fi
-                COMPRESSION_CMD="gzip -${COMPRESSION_LEVEL} > ${OUTPUT_FILE}${PART_NUM}.gz"
-                FULL_CMD="${FULL_CMD} | $COMPRESSION_CMD &"
-            else
-                OUTPUT_CMD="dd of=${OUTPUT_FILE}${PART_NUM}.part bs=${BLOCKSIZEBYTES}"
-                FULL_CMD="${FULL_CMD} | $OUTPUT_CMD &"
-            fi
-        fi
-        echo -e "${INFOCOLOR}${FULL_CMD}${NOCOLOR}"
-        eval "${FULL_CMD}"
-        register_job $! "Teil ${PART_NUM} (backup)"
-        done
-        
-        
-        ## Run `dd` in parallel to copy each split file and compress the output with gzip
-        ## The following lines were used in the past, when the full command was not dynamically build
-        #for ((PART_NUM=0; PART_NUM<${NUM_JOBS}; PART_NUM++)); do
-        #  START=$((PART_NUM * SPLIT_SIZE))
-        #  echo "dd if=${INPUT} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / ${BLOCKSIZEBYTES})) skip=$((START / ${BLOCKSIZEBYTES})) | tee >(sha256sum > ${OUTPUT_FILE}${PART_NUM}.sha256) | gzip > ${OUTPUT_FILE}${PART_NUM}.gz &"
-        #  dd if=${INPUT} bs=${BLOCKSIZEBYTES} count=$((SPLIT_SIZE / ${BLOCKSIZEBYTES})) skip=$((START / ${BLOCKSIZEBYTES})) | tee >(sha256sum > ${OUTPUT_FILE}${PART_NUM}.sha256) | gzip > ${OUTPUT_FILE}${PART_NUM}.gz &
-        #done
-
+        backup_mode
         # Wait for all jobs to finish and collect their exit codes
         wait_for_jobs
         ;;
