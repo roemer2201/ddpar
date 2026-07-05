@@ -10,6 +10,7 @@ INPUT_FILE_BASENAME=""
 OUTPUT_FILE=""
 INTERNAL_EXITCODE=0
 REMOTE=0
+REMOTE_MODE="n"
 REMOTE_HOST=""
 SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
 DEBUG=0
@@ -25,7 +26,9 @@ function show_help {
   echo "Optionen:"
   echo "-i, --input PATH        Der Basisname des geteilten Abbildes (bei Remote: Pfad auf dem Remote-Host)"
   echo "-o, --output PATH       Vollständiger Pfad des (lokalen) Zielgeräts"
-  echo "-r [n]                  Remote-Restore über SSH+Netcat (nur unkomprimiert)"
+  echo "-r [nc]                 Remote-Restore über SSH+Netcat."
+  echo "                        n: komprimierte Backups werden lokal entpackt (Default)"
+  echo "                        c: Dekompression auf der Remote-Maschine"
   echo "-R user@host            Angabe des Remote-Host, auf dem das Backup liegt"
   echo "-y                      Sicherheitsabfrage überspringen (assume yes)"
   echo "-P                      Vorab-Reservierung des Zielplatzes (fallocate) überspringen"
@@ -43,10 +46,20 @@ while getopts ":i:o:r::R:yPh" opt; do
     P) SKIP_PREALLOC=1;;
     r)
       REMOTE=1
-      # Bisher ist nur Modus "n" (netcat, Datenkanal unverschlüsselt) implementiert.
-      if [[ ${OPTARG} =~ [lc] ]]; then
-        echo "[WARN] Remote-Modus '${OPTARG}' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat."
-      fi
+      # Implementiert: "n" (netcat; komprimierte Backups werden lokal
+      # entpackt) und "c" (Dekompression auf der Remote-Maschine).
+      case "${OPTARG:-n}" in
+        n) REMOTE_MODE="n";;
+        c) REMOTE_MODE="c";;
+        l)
+          echo "[WARN] Remote-Modus 'l' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat."
+          REMOTE_MODE="n"
+          ;;
+        *)
+          echo "Ungültiger Remote-Modus '${OPTARG}'. Gültige Angaben: n|l|c"
+          exit 1
+          ;;
+      esac
       ;;
     R)
       REMOTE=1
@@ -305,7 +318,30 @@ function restore_split_image {
     # teilbare Backups funktionieren. Direkte Pipelines statt eval-Strings:
     # Pfade mit Leerzeichen o.ä. sind so ungefährlich.
     dd_out=(dd of="${OUTPUT_FILE}" bs="${BLOCKSIZEBYTES}" iflag=fullblock,count_bytes count="${COUNT_BYTES}" oflag=seek_bytes seek="${START}" conv=notrunc)
-    if [ $REMOTE -eq 1 ]; then
+    if [ $REMOTE -eq 1 ] && [ ! -z "$COMPRESSION" ] && [ "$REMOTE_MODE" = "c" ]; then
+      # Remote-Dekompression: Remote entpackt die .gz-Teile, Rohdaten laufen über netcat
+      if [ $PART_NUM -eq 0 ]; then
+        echo "Source is remote (compressed, remote decompression)"
+      fi
+      if ! remote_restore_commands "gzip -dc \"${INPUT_FILES}${PART_NUM}.gz\""; then
+        echo "Remote-Restore-Sender für Teil ${PART_NUM} konnte nicht gestartet werden."
+        break
+      fi
+      echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | ${dd_out[*]}"
+      nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" </dev/null | "${dd_out[@]}" &
+    elif [ $REMOTE -eq 1 ] && [ ! -z "$COMPRESSION" ]; then
+      # Lokale Dekompression: die .gz-Bytes werden unverändert übertragen
+      # und erst lokal entpackt (bandbreitensparend)
+      if [ $PART_NUM -eq 0 ]; then
+        echo "Source is remote (compressed, local decompression)"
+      fi
+      if ! remote_restore_commands "dd if=\"${INPUT_FILES}${PART_NUM}.gz\" bs=${BLOCKSIZEBYTES} iflag=fullblock"; then
+        echo "Remote-Restore-Sender für Teil ${PART_NUM} konnte nicht gestartet werden."
+        break
+      fi
+      echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | zcat | ${dd_out[*]}"
+      nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" </dev/null | zcat | "${dd_out[@]}" &
+    elif [ $REMOTE -eq 1 ]; then
       # Remote netcat restore, unkomprimiert: Remote sendet, lokal wird empfangen und geschrieben
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is remote (uncompressed)"
@@ -370,14 +406,6 @@ INPUT_FILE_TYPE=$(grep "^FILE_TYPE=" "$METADATA_SRC" | cut -d "=" -f 2)
 BLOCKSIZEBYTES=$(grep "^BLOCKSIZEBYTES=" "$METADATA_SRC" | cut -d "=" -f 2)
 COMPRESSION=$(grep "^COMPRESSION=" "$METADATA_SRC" | cut -d "=" -f 2)
 COMPRESSION_LEVEL=$(grep "^COMPRESSION_LEVEL=" "$METADATA_SRC" | cut -d "=" -f 2)
-
-# Remote-Restore unterstützt derzeit nur unkomprimierte Backups (netcat, uncompressed)
-if [ $REMOTE -eq 1 ] && [ ! -z "$COMPRESSION" ]; then
-  echo "Remote-Restore unterstützt derzeit nur unkomprimierte Backups (netcat, uncompressed)."
-  rm -f "$METADATA_SRC"
-  close_ssh_connection
-  exit 1
-fi
 
 # Leserechte auf die Teil-Dateien vorab prüfen, damit der Restore nicht erst
 # mitten im parallelen Lauf an fehlenden Rechten scheitert (lokal; remote

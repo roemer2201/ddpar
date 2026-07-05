@@ -31,8 +31,9 @@ function show_help {
   echo "-d PATH         Destination to compare against"
   echo "-j NUM          Anzahl der Jobs für den Clone-Check (Default: 4, nur ohne -b)"
   echo "-B NUM          Blockgröße in Bytes für den Clone-Check (Default: 1048576, nur ohne -b)"
-  echo "-r [n]          Remote-Check über SSH (nur unkomprimiert). Die gesicherte/geklonte"
-  echo "                Seite (-b bzw. bei Clone-Check -d) liegt auf dem Remote-Host."
+  echo "-r [n]          Remote-Check über SSH (unkomprimierte und komprimierte Backups)."
+  echo "                Die gesicherte/geklonte Seite (-b bzw. bei Clone-Check -d) liegt"
+  echo "                auf dem Remote-Host."
   echo "-R user@host    Angabe des Remote-Host"
   echo "-h, --help      Zeigt diese Hilfemeldung an"
 }
@@ -193,10 +194,15 @@ function remote_seg_hash {
 }
 
 function remote_part_hash {
-  # $1 = Segment-Index. Hasht die komplette .part-Datei auf dem Remote-Host
-  # (entspricht dem Segment, da unkomprimiert exakt SPLIT_SIZE Bytes).
+  # $1 = Segment-Index. Hasht die Teil-Datei auf dem Remote-Host: unkomprimiert
+  # die komplette .part-Datei (entspricht dem Segment), komprimiert den
+  # entpackten Inhalt der .gz-Datei — verglichen wird immer der Rohdaten-Hash.
   local idx=$1
-  execute_remote_command "sha256sum '${BASE_FILES}${idx}.part'" | cut -d' ' -f1
+  if [ -n "$COMPRESSION" ]; then
+    execute_remote_command "gzip -dc '${BASE_FILES}${idx}.gz' | sha256sum" | cut -d' ' -f1
+  else
+    execute_remote_command "sha256sum '${BASE_FILES}${idx}.part'" | cut -d' ' -f1
+  fi
 }
 
 function require_sha256_files {
@@ -385,13 +391,6 @@ if [ ! -z "${BASE_PATH}" ]; then
   # Ältere Metadatendateien ohne INPUT_SIZE: glatte Teilung annehmen
   [ -z "$INPUT_SIZE" ] && INPUT_SIZE=$((SPLIT_SIZE * NUM_JOBS))
   [ $REMOTE -eq 1 ] && rm -f "$META_SRC"
-
-  # Remote-Check unterstützt derzeit nur unkomprimierte Backups
-  if [ $REMOTE -eq 1 ] && [ ! -z "$COMPRESSION" ]; then
-    echo "Remote-Check unterstützt derzeit nur unkomprimierte Backups (netcat, uncompressed)."
-    close_ssh_connection
-    exit 1
-  fi
 
   # Debug Info:
   echo ${BASE_PATH}

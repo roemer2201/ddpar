@@ -55,12 +55,13 @@ Manuelle Tests: siehe `TESTING.md`.
 
 ## Bekannte Einschränkungen / offene Baustellen
 
-- Remote Backup, Remote Restore und Remote Checks (netcat, unkomprimiert) sind implementiert; komprimierter Remote-Transfer fehlt noch (🛑 in README)
+- Remote Backup, Remote Restore und Remote Checks (netcat) sind implementiert, unkomprimiert und komprimiert; Kompression wahlweise lokal (`-r n -c`) oder auf der Remote-Maschine (`-r c`)
 - Remote Checks (`ddpar-check.sh -r`) vergleichen nur SHA256-Hashes je Segment (lokal vs. per SSH) — kein netcat-Datentransfer nötig
 - `RANDOM` in Bash liefert nur 0–32767 → Remote-Ports werden aus dem Bereich 10000–42767 gewählt
 - `fallocate` funktioniert nicht auf Block-Devices (wird korrekt übersprungen)
 - Beliebige Eingabegrößen: `SPLIT_SIZE` wird auf die Blockgröße abgerundet, der letzte Teil überträgt den Rest (`part_bytes`, dd-Flags `count_bytes`/`skip_bytes`/`seek_bytes`)
-- Remote-Modus-Flags (`-r l/n/c`) sind noch nicht vollständig implementiert
+- Remote-Modus `-r l` (vollständig verschlüsselter Datenkanal) ist noch nicht implementiert (Warnung + Fallback auf `n`); `-r n` und `-r c` sind implementiert
+- Clone mit `-s` erzeugt lokale `.sha256`- und Metadatendateien am Basis-Pfad aus `-n` (prüfbar mit `ddpar-check.sh -b BASE -d ZIEL`)
 
 ## Branch-Strategie
 

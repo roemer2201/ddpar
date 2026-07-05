@@ -1,5 +1,35 @@
 # Changelog
 
+## [Unreleased] – branch claude/ddpar-open-items-dawpvl (Clone-Checksummen + komprimierter Remote-Transfer)
+
+### Hinzugefügt
+- **Clone-Modus `-s`:** erzeugt lokale `.sha256`-Dateien und eine
+  Metadatendatei am Basis-Pfad aus `-n` (Default: Basename der Eingabe im
+  aktuellen Verzeichnis). Damit ist ein Clone anschließend mit
+  `ddpar-check.sh -b BASE -d ZIEL` prüfbar, ohne die Quelle erneut zu lesen.
+  `-n` darf im Clone-Modus ein Pfad sein (im Backup-Modus weiterhin ein
+  reiner Name)
+- **Komprimierter Remote-Transfer (Backup):** `-r n -c` komprimiert lokal und
+  überträgt die `.gz`-Bytes (bandbreitensparend); `-r c` überträgt Rohdaten
+  und komprimiert auf der Remote-Maschine (CPU-Entlastung lokal). `-r c`
+  impliziert `-c`. `COMPRESSION`/`COMPRESSION_LEVEL` stehen jetzt auch bei
+  Remote-Backups in den Metadaten
+- **Komprimierter Remote-Restore:** komprimierte Backups werden über die
+  Metadaten erkannt; `-r n` überträgt die `.gz`-Bytes und entpackt lokal,
+  `-r c` entpackt auf dem Remote-Host und überträgt Rohdaten
+- **Komprimierter Clone-Transfer:** Remote-Clone mit `-c` packt lokal und
+  entpackt auf der Remote-Seite vor dem Schreiben ins Ziel
+- **ddpar-check.sh:** Remote-Checks unterstützen komprimierte Backups
+  (`gzip -dc | sha256sum` per SSH); Ablehnung komprimierter Backups entfernt
+
+### Geändert
+- `-r`-Modi werden in `REMOTE_MODE` gespeichert; ungültige Modi führen zu
+  Exit 1, `l` warnt weiterhin und fällt auf `n` zurück
+- Lokaler Clone mit `-c` warnt und ignoriert die Kompression (das Ziel ist
+  ein Blockgerät/eine Datei in Originalgröße — es gibt nichts zu speichern)
+- Remote-Backup mit `-s` warnt explizit, dass keine `.sha256`-Dateien auf dem
+  Remote-Host entstehen (Prüfung via `ddpar-check.sh -r` braucht sie nicht)
+
 ## [Unreleased] – branch claude/ddpar-open-items-dawpvl (Quick Wins aus der To-Do-Liste)
 
 ### Hinzugefügt

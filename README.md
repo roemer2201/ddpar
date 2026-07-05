@@ -44,7 +44,13 @@ unterstützt: Ein nicht gleichmäßig verteilbarer Rest wird vom letzten Teil
 # Klonen Gerät -> Gerät mit 8 Jobs
 ./ddpar.sh -i /dev/sdb -o /dev/sdc -j 8
 
-# Clone prüfen (ohne Backup-Metadaten: -j/-B wie beim Clone angeben)
+# Klonen mit Checksummen (-s): schreibt /tmp/clone-sums-N.sha256 + Metadaten
+./ddpar.sh -i /dev/sdb -o /dev/sdc -s -n /tmp/clone-sums
+
+# Clone gegen die Checksummen prüfen (ohne die Quelle erneut zu lesen)
+./ddpar-check.sh -b /tmp/clone-sums -d /dev/sdc
+
+# Clone prüfen (ohne Checksummen/Metadaten: -j/-B wie beim Clone angeben)
 ./ddpar-check.sh -s /dev/sdb -d /dev/sdc -j 8
 ```
 
@@ -58,6 +64,15 @@ unterstützt: Ein nicht gleichmäßig verteilbarer Rest wird vom letzten Teil
 
 # Remote-Backup und -Restore (unkomprimiert)
 ./ddpar.sh -i /dev/sdb -o /remote/backup -m backup -r n -R user@zielhost
+./ddpar-restore.sh -i /remote/backup/sdb -o /dev/sdc -r n -R user@zielhost
+
+# Remote-Backup komprimiert: -r n -c = gzip lokal (.gz wird übertragen),
+# -r c = gzip auf dem Remote-Host (Rohdaten werden übertragen)
+./ddpar.sh -i /dev/sdb -o /remote/backup -m backup -r n -c -R user@zielhost
+./ddpar.sh -i /dev/sdb -o /remote/backup -m backup -r c -R user@zielhost
+
+# Restore eines komprimierten Remote-Backups (Erkennung über Metadaten):
+# -r n entpackt lokal, -r c entpackt auf dem Remote-Host
 ./ddpar-restore.sh -i /remote/backup/sdb -o /dev/sdc -r n -R user@zielhost
 
 # Remote-Check (nur SHA256-Hashes laufen über SSH)
@@ -140,30 +155,28 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
 | block dev | :heavy_check_mark: (:heavy_check_mark:) | | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 | file | :heavy_check_mark: (:heavy_check_mark:) | | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 
-#### local [de]compression
+#### local [de]compression (`-r n -c`: gzip lokal, .gz wird übertragen)
 | | backup gzip (check) | restore gzip (check) |
 |-|----------|----------|
-| block dev | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
-| file | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
+| block dev | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
+| file | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 
-#### remote [de]compression
+#### remote [de]compression (`-r c`: Rohdaten übertragen, gzip auf dem Remote-Host)
 | | backup gzip (check) | restore gzip (check) |
 |-----------|----------|----------|
-| block dev | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
-| file | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
+| block dev | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
+| file | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 
 #### compressed transfer (compression+decompression before and after transfer)
 | | clone |
 |----------|----------|
-| block dev | :stop_sign: |
-| file | :stop_sign: |
+| block dev | :heavy_check_mark: |
+| file | :heavy_check_mark: |
 
 ## To Do
 
-- ddpar.sh:
-  - Checksummen/Kompression auch im Clone-Modus (analog Backup-Modus)
-- `BASE_NAME` als Pfad für Checksummen-Dateien von Clones nutzen (wenn Checksummen angefordert)
 - Kompression + `-s`: Checksumme optional auch für die komprimierten Dateien berechnen (derzeit nur für die Rohdaten)
 - Remoting:
-  - Verschlüsselter Datenkanal (`-r l`) und Remote-Kompression (`-r c`)
+  - Verschlüsselter Datenkanal (`-r l`)
+  - `-s` beim Remote-Backup: .sha256-Dateien auf dem Remote-Host erzeugen (derzeit Warnung; Prüfung via `ddpar-check.sh -r` funktioniert ohne sie)
   - Remote-Eingabe mit lokaler Ausgabe (noch nicht durchdacht)

@@ -13,6 +13,7 @@ BLOCKSIZEBYTES="1048576"
 COMPRESSION=${COMPRESSION:-0}
 CHECKSUM=${CHECKSUM:-0}
 REMOTE=0
+REMOTE_MODE="n"
 #SSH_SOCKET_PATH="/tmp/ssh_mux_%n_%p_%r"
 SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
 INTERNAL_EXITCODE=0
@@ -31,9 +32,12 @@ function show_help {
   echo "-m clone|backup         Ziel des Vorgangs (Default: clone)"
   echo "-j NUM                  Die Anzahl der Jobs (Default: 4)"
   echo "-b NUM                  Die Blockgröße in Bytes (Default: 1048576 Bytes (1 MiB))"
-  echo "-n NAME                 Eigener Basisname der Backup-Dateien (Default: Basename der Eingabe, nur -m backup)"
-  echo "-c                      Komprimierung anfordern, Kompressionslevel zur Zeit nicht einstellbar (Default: -6)"
-  echo "-s                      Checksumme der einzelnen Teile erstellen"
+  echo "-n NAME                 Eigener Basisname der Backup-Dateien (Default: Basename der Eingabe)."
+  echo "                        Im Clone-Modus mit -s: Basis-Pfad für Checksummen- und Metadatendatei"
+  echo "-c                      Komprimierung anfordern, Kompressionslevel zur Zeit nicht einstellbar (Default: -6)."
+  echo "                        Im Clone-Modus nur bei Remote wirksam (komprimierter Transfer)"
+  echo "-s                      Checksumme der einzelnen Teile erstellen (Clone: .sha256- und Metadatendatei"
+  echo "                        am Basis-Pfad aus -n, prüfbar mit ddpar-check.sh -b BASE -d ZIEL)"
   echo "-f                      Force - ignore Probleme und erzwinge den Vorgang"
   echo "-r [lnc]                Remote-Verbindung, nur SSH möglich. Remote-Optionen: siehe unten"
   echo "-R user@host            Angabe des Remote-Host"
@@ -44,7 +48,8 @@ function show_help {
   echo "n: Standardeinstellung, No encryption, Verbindungsaufbau verschlüsselt (SSH),"
   echo "   Datenübertragung unverschlüsselt über netcat (nur in vertrauenswürdigen Netzen verwenden!)"
   echo "l: GEPLANT, noch nicht implementiert: Übertragung vollständig verschlüsselt"
-  echo "c: GEPLANT, noch nicht implementiert: Kompression auf der Remote-Maschine"
+  echo "c: Kompression/Dekompression auf der Remote-Maschine (impliziert -c; Datenkanal"
+  echo "   wie bei n unverschlüsselt über netcat)"
 }
 
 function option_analysis {
@@ -57,13 +62,7 @@ function option_analysis {
       m) MODE="${OPTARG}";;
       j) NUM_JOBS="${OPTARG}";;
       b) BLOCKSIZEBYTES="${OPTARG}";;
-      n)
-        if [[ "${OPTARG}" == */* ]]; then
-          echo -e "${ERRORCOLOR}Ungültiger Basisname '${OPTARG}': darf keinen Schrägstrich enthalten.${NOCOLOR}"
-          exit 1
-        fi
-        BASE_NAME="${OPTARG}"
-        ;;
+      n) BASE_NAME="${OPTARG}";;
       c)
 	    COMPRESSION=1
 		echo "COMPRESSION enabled."
@@ -91,12 +90,21 @@ function option_analysis {
         ;;
       r)
         REMOTE=1
-        # Bisher ist nur Modus "n" (netcat, Datenkanal unverschlüsselt)
-        # implementiert. "l" (verschlüsselt) und "c" (Remote-Kompression)
-        # sind geplant — hier ehrlich warnen statt still zurückzufallen.
-        if [[ ${OPTARG} =~ [lc] ]]; then
-          echo -e "${WARNCOLOR}[WARN] Remote-Modus '${OPTARG}' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat.${NOCOLOR}"
-        fi
+        # Implementiert: "n" (netcat, Datenkanal unverschlüsselt) und "c"
+        # ([De]Kompression auf der Remote-Maschine). "l" (verschlüsselt) ist
+        # geplant — hier ehrlich warnen statt still zurückzufallen.
+        case "${OPTARG:-n}" in
+          n) REMOTE_MODE="n";;
+          c) REMOTE_MODE="c";;
+          l)
+            echo -e "${WARNCOLOR}[WARN] Remote-Modus 'l' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat.${NOCOLOR}"
+            REMOTE_MODE="n"
+            ;;
+          *)
+            echo -e "${ERRORCOLOR}Ungültiger Remote-Modus '${OPTARG}'. Gültige Angaben: n|l|c${NOCOLOR}"
+            exit 1
+            ;;
+        esac
         ;;
       R)
         REMOTE=1
@@ -113,6 +121,28 @@ function option_analysis {
   if [ -z "${INPUT}" ] || [ -z "${OUTPUT}" ] ; then
     echo -e "${ERRORCOLOR}Fehlende Parameter. Bitte geben Sie alle erforderlichen Parameter --input und --output an.${NOCOLOR}"
     exit 1
+  fi
+
+  # -n: im Backup-Modus ein reiner Name (relativ zum Ausgabeverzeichnis),
+  # im Clone-Modus darf es ein Pfad für die Checksummen-Dateien sein.
+  if [ -n "${BASE_NAME}" ] && [ "${MODE}" == "backup" ] && [[ "${BASE_NAME}" == */* ]]; then
+    echo -e "${ERRORCOLOR}Ungültiger Basisname '${BASE_NAME}': darf im Backup-Modus keinen Schrägstrich enthalten.${NOCOLOR}"
+    exit 1
+  fi
+
+  # -r c bedeutet [De]Kompression auf der Remote-Maschine und impliziert -c
+  if [ "${REMOTE_MODE}" == "c" ] && [ "${COMPRESSION}" -ne 1 ]; then
+    COMPRESSION=1
+    COMPRESSION_LEVEL="${COMPRESSION_LEVEL:-6}"
+    echo -e "${INFOCOLOR}-r c impliziert Kompression (Level ${COMPRESSION_LEVEL}).${NOCOLOR}"
+  fi
+
+  # Beim lokalen Clone gibt es keinen Speicherort für komprimierte Daten
+  # (Ziel ist Datei/Blockgerät in Originalgröße) — Kompression wirkt im
+  # Clone-Modus nur als komprimierter Remote-Transfer.
+  if [ "${MODE}" == "clone" ] && [ "${COMPRESSION}" -eq 1 ] && [ ${REMOTE} -ne 1 ]; then
+    echo -e "${WARNCOLOR}[WARN] Kompression (-c) hat beim lokalen Clone keine Wirkung und wird ignoriert.${NOCOLOR}"
+    COMPRESSION=0
   fi
   }
 
@@ -511,15 +541,50 @@ function clone_block {
     run_clone_parts "${OUTPUT}"
 }
 
+function setup_clone_checksums {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	# Bereitet Checksummen für den Clone-Modus vor: CLONE_BASE ist der
+	# Basis-Pfad (aus -n, sonst Basename der Eingabe im aktuellen
+	# Verzeichnis). Neben den .sha256-Dateien entsteht eine Metadatendatei,
+	# damit der Clone später mit "ddpar-check.sh -b CLONE_BASE -d ZIEL"
+	# geprüft werden kann. Beides liegt immer lokal, auch bei Remote-Clones.
+	CLONE_BASE="${BASE_NAME:-$(basename "${INPUT}")}"
+	local base_dir
+	base_dir=$(dirname "${CLONE_BASE}")
+	if [ ! -d "${base_dir}" ] || [ ! -w "${base_dir}" ]; then
+		echo -e "${ERRORCOLOR}Fehler: Verzeichnis ${base_dir} für die Checksummen-Dateien existiert nicht oder ist nicht beschreibbar.${NOCOLOR}"
+		return 1
+	fi
+	{
+		echo "NUM_JOBS=${NUM_JOBS}"
+		echo "FILE_NAME=$(basename "${CLONE_BASE}")"
+		echo "BLOCKSIZEBYTES=${BLOCKSIZEBYTES}"
+		echo "INPUT_SIZE=${INPUT_SIZE}"
+		echo "INPUT_FILE_NAME=$(basename "${INPUT}")"
+		echo "FILE_TYPE=${INPUT_FILE_TYPE}"
+		echo "SPLIT_SIZE=${SPLIT_SIZE}"
+	} > "${CLONE_BASE}-metadata.txt"
+	echo -e "${INFOCOLOR}Checksummen werden nach ${CLONE_BASE}-N.sha256 geschrieben (Metadaten: ${CLONE_BASE}-metadata.txt).${NOCOLOR}"
+}
+
 function run_clone_parts {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
 	# Startet die parallelen dd-Teil-Prozesse eines Clone-Vorgangs.
 	# $1 = Ausgabeziel (Datei oder Blockgerät); bei REMOTE=1 wird pro Teil
-	# ein nc-Listener auf dem Remote-Host eingerichtet.
-	# ToDo: Checksum/Kompression für Clone analog zum Backup-Modus umsetzen.
+	# ein nc-Listener auf dem Remote-Host eingerichtet. Mit -s entstehen
+	# lokale .sha256-/Metadaten-Dateien (setup_clone_checksums); mit -c wird
+	# der Remote-Transfer komprimiert (gzip lokal, Dekompression remote —
+	# bei REMOTE_MODE=c ist das gleichwertig, da das Ziel Rohdaten braucht).
 	local output_target=$1
 	local PART_NUM START COUNT_BYTES
-	local dd_in dd_out
+	local dd_in dd_out remote_out
+
+	if [ $CHECKSUM -eq 1 ]; then
+		if ! setup_clone_checksums; then
+			INTERNAL_EXITCODE=1
+			return 1
+		fi
+	fi
 
 	for ((PART_NUM=0; PART_NUM<NUM_JOBS; PART_NUM++)); do
 		START=$((PART_NUM * SPLIT_SIZE))
@@ -533,12 +598,31 @@ function run_clone_parts {
 		if [ $REMOTE -eq 1 ]; then
 			# Die Empfängerseite läuft auf dem Remote-Host und wird als String
 			# über SSH gestartet; der Pfad ist dort in Anführungszeichen gesetzt.
-			if ! setup_remote_listener "dd of=\"${output_target}\" bs=${BLOCKSIZEBYTES} oflag=seek_bytes seek=${START} conv=notrunc"; then
+			remote_out="dd of=\"${output_target}\" bs=${BLOCKSIZEBYTES} oflag=seek_bytes seek=${START} conv=notrunc"
+			if [ $COMPRESSION -eq 1 ]; then
+				# Komprimierter Transfer: lokal packen, remote entpacken
+				remote_out="gzip -dc | ${remote_out}"
+			fi
+			if ! setup_remote_listener "${remote_out}"; then
 				echo -e "${ERRORCOLOR}Remote-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				return 1
 			fi
-			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
-			"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+			if [ $CHECKSUM -eq 1 ] && [ $COMPRESSION -eq 1 ]; then
+				echo -e "${INFOCOLOR}${dd_in[*]} | tee >(sha256sum > ${CLONE_BASE}-${PART_NUM}.sha256) | gzip -${COMPRESSION_LEVEL} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+				"${dd_in[@]}" | tee >(sha256sum > "${CLONE_BASE}-${PART_NUM}.sha256") | gzip -"${COMPRESSION_LEVEL}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+			elif [ $COMPRESSION -eq 1 ]; then
+				echo -e "${INFOCOLOR}${dd_in[*]} | gzip -${COMPRESSION_LEVEL} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+				"${dd_in[@]}" | gzip -"${COMPRESSION_LEVEL}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+			elif [ $CHECKSUM -eq 1 ]; then
+				echo -e "${INFOCOLOR}${dd_in[*]} | tee >(sha256sum > ${CLONE_BASE}-${PART_NUM}.sha256) | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+				"${dd_in[@]}" | tee >(sha256sum > "${CLONE_BASE}-${PART_NUM}.sha256") | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+			else
+				echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+				"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+			fi
+		elif [ $CHECKSUM -eq 1 ]; then
+			echo -e "${INFOCOLOR}${dd_in[*]} | tee >(sha256sum > ${CLONE_BASE}-${PART_NUM}.sha256) | ${dd_out[*]}${NOCOLOR}"
+			"${dd_in[@]}" | tee >(sha256sum > "${CLONE_BASE}-${PART_NUM}.sha256") | "${dd_out[@]}" &
 		else
 			echo -e "${INFOCOLOR}${dd_in[*]} | ${dd_out[*]}${NOCOLOR}"
 			"${dd_in[@]}" | "${dd_out[@]}" &
@@ -666,9 +750,13 @@ function backup_mode {
 	append_metadata "FILE_TYPE=${INPUT_FILE_TYPE}"
 	append_metadata "SPLIT_SIZE=${SPLIT_SIZE}"
 
-	if [ $COMPRESSION -eq 1 ] && [ $REMOTE -ne 1 ]; then
+	if [ $COMPRESSION -eq 1 ]; then
 		append_metadata "COMPRESSION=${COMPRESSION}"
 		append_metadata "COMPRESSION_LEVEL=${COMPRESSION_LEVEL}"
+	fi
+
+	if [ $CHECKSUM -eq 1 ] && [ $REMOTE -eq 1 ]; then
+		echo -e "${WARNCOLOR}[WARN] -s wird beim Remote-Backup ignoriert: .sha256-Dateien entstehen nicht auf dem Remote-Host. ddpar-check.sh -r prüft Remote-Backups ohne sie (Hashes via SSH).${NOCOLOR}"
 	fi
 
 	local PART_NUM START COUNT_BYTES PART_BASE
@@ -685,9 +773,27 @@ function backup_mode {
 		dd_in=(dd if="${INPUT}" bs="${BLOCKSIZEBYTES}" iflag=count_bytes,skip_bytes count="${COUNT_BYTES}" skip="${START}")
 		dd_out=(dd of="${PART_BASE}.part" bs="${BLOCKSIZEBYTES}")
 
-		if [ $REMOTE -eq 1 ]; then
-			# Remote netcat backup, unkomprimiert, ohne Checksumme. Die
-			# Empfängerseite läuft auf dem Remote-Host (String via SSH).
+		if [ $REMOTE -eq 1 ] && [ $COMPRESSION -eq 1 ] && [ "${REMOTE_MODE}" == "c" ]; then
+			# Remote-Kompression: Rohdaten über netcat, gzip läuft auf dem
+			# Remote-Host (Empfängerseite als String via SSH).
+			if ! setup_remote_listener "gzip -${COMPRESSION_LEVEL} > \"${PART_BASE}.gz\""; then
+				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
+				break
+			fi
+			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+		elif [ $REMOTE -eq 1 ] && [ $COMPRESSION -eq 1 ]; then
+			# Lokale Kompression: gzip lokal, die komprimierten Bytes werden
+			# unverändert übertragen und remote als .gz abgelegt.
+			if ! setup_remote_listener "dd of=\"${PART_BASE}.gz\" bs=${BLOCKSIZEBYTES}"; then
+				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
+				break
+			fi
+			echo -e "${INFOCOLOR}${dd_in[*]} | gzip -${COMPRESSION_LEVEL} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | gzip -"${COMPRESSION_LEVEL}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+		elif [ $REMOTE -eq 1 ]; then
+			# Remote netcat backup, unkomprimiert. Die Empfängerseite läuft
+			# auf dem Remote-Host (String via SSH).
 			if ! setup_remote_listener "dd of=\"${PART_BASE}.part\" bs=${BLOCKSIZEBYTES}"; then
 				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				break

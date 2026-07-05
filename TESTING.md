@@ -186,8 +186,8 @@ Datei:
 
 ### 3.3 Clone prüfen (Source ↔ Destination, ohne Backup-Metadaten)
 
-Da beim Clone keine Metadatendatei existiert, müssen Jobs (und ggf.
-Blockgröße) wie beim Clone-Vorgang angegeben werden:
+Da beim Clone standardmäßig keine Metadatendatei existiert, müssen Jobs
+(und ggf. Blockgröße) wie beim Clone-Vorgang angegeben werden:
 
 Block Device:
 ```bash
@@ -197,6 +197,15 @@ sudo ./ddpar-check.sh -s $SOURCE_DEV -d $DEST_DEV -j 4
 Datei:
 ```bash
 ./ddpar-check.sh -s $SOURCE_FILE -d $DEST_DIR/ddpar_test.img -j 4
+```
+
+Wurde der Clone mit `-s` erstellt, existieren Checksummen- und Metadatendatei
+am Basis-Pfad aus `-n` — die Prüfung läuft dann wie bei einem Backup, ohne die
+Quelle erneut zu lesen:
+
+```bash
+sudo ./ddpar.sh -i $SOURCE_DEV -o $DEST_DEV -s -n /tmp/clone-sums
+sudo ./ddpar-check.sh -b /tmp/clone-sums -d $DEST_DEV
 ```
 
 ---
@@ -241,7 +250,8 @@ sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r n -c -R $REMOTE_H
 
 ### 4.5 Remote Clone – Block Device, remote Kompression (Modus c)
 
-Kompression findet auf der Remote-Seite statt.
+`-r c` impliziert `-c`. Da das Clone-Ziel ein Blockgerät ist (Rohdaten), läuft
+die Übertragung wie in 4.4 komprimiert: lokal gzip, remote Dekompression.
 
 ```bash
 sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r c -R $REMOTE_HOST
@@ -250,11 +260,23 @@ sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r c -R $REMOTE_HOST
 ### 4.6 Remote Backup – Block Device, unkomprimiert (Modus n)
 
 Die Split-Teile werden per Netcat zum `$REMOTE_HOST` übertragen und dort als
-`*.part`-Dateien abgelegt. Die Übertragung ist unkomprimiert und ohne Prüfsumme
-(`-c`/`-s` werden auf dem Remote-Pfad nicht angewendet).
+`*.part`-Dateien abgelegt (`-s` wird auf dem Remote-Pfad nicht angewendet —
+Prüfung via `ddpar-check.sh -r`, siehe 4.10).
 
 ```bash
 sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_BACKUP_DIR -m backup -r n -R $REMOTE_HOST
+```
+
+Komprimiert — lokale Kompression (gzip lokal, `.gz` wird übertragen):
+
+```bash
+sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_BACKUP_DIR -m backup -r n -c -R $REMOTE_HOST
+```
+
+Komprimiert — remote Kompression (Rohdaten übertragen, gzip auf dem Remote-Host):
+
+```bash
+sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_BACKUP_DIR -m backup -r c -R $REMOTE_HOST
 ```
 
 > **Voraussetzung:** `$REMOTE_BACKUP_DIR` muss auf dem Remote-Host als Verzeichnis
@@ -309,11 +331,19 @@ mit aufsteigenden Ports sowie lokal `dd if=… | nc localhost <PORT> &`.
 
 Die Backup-Teile liegen auf dem `$REMOTE_HOST`; das Zielgerät `-o` ist **lokal**.
 Der Remote-Host sendet die Teile per Netcat, lokal werden sie empfangen und
-geschrieben. Nur unkomprimiert (komprimierte Backups werden remote abgelehnt).
+geschrieben. Komprimierte Backups werden automatisch erkannt (Metadaten):
+mit `-r n` werden die `.gz`-Bytes übertragen und lokal entpackt, mit `-r c`
+entpackt der Remote-Host und überträgt Rohdaten.
 Der `-i`-Basispfad ist der Pfad **auf dem Remote-Host** ohne abschließendes `-`.
 
 ```bash
 sudo ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/sdb -o $DEST_DEV -r n -R $REMOTE_HOST
+```
+
+Komprimiertes Remote-Backup mit remote Dekompression wiederherstellen:
+
+```bash
+sudo ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/sdb -o $DEST_DEV -r c -R $REMOTE_HOST
 ```
 
 > **Voraussetzung:** Ein vorher erstelltes Remote-Backup aus Test 4.6.

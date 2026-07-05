@@ -158,3 +158,45 @@ load helpers
   [ "$status" -eq 1 ]
   [[ "$output" == *"ohne Checksummen"* ]]
 }
+
+@test "Clone mit -s erzeugt Checksummen; ddpar-check -b/-d bestätigt und erkennt Manipulation" {
+  make_testfile "$TMP/quelle.bin" 4
+  : > "$TMP/ziel.bin"
+
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/ziel.bin" -f -s -n "$TMP/clonesums"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/clonesums-0.sha256" ]
+  [ -f "$TMP/clonesums-metadata.txt" ]
+  cmp -s "$TMP/quelle.bin" "$TMP/ziel.bin"
+
+  vrun "$REPO_ROOT/ddpar-check.sh" -b "$TMP/clonesums" -d "$TMP/ziel.bin"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"FAILED"* ]]
+
+  # Ziel manipulieren -> Prüfung muss fehlschlagen
+  printf 'tampered' | dd of="$TMP/ziel.bin" bs=1 seek=0 conv=notrunc status=none
+  vrun "$REPO_ROOT/ddpar-check.sh" -b "$TMP/clonesums" -d "$TMP/ziel.bin"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FAILED"* ]]
+}
+
+@test "Clone mit -s ohne -n nutzt den Basename der Quelle im aktuellen Verzeichnis" {
+  make_testfile "$TMP/quelle.bin" 4
+  : > "$TMP/ziel.bin"
+
+  cd "$TMP"
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/ziel.bin" -f -s
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/quelle.bin-0.sha256" ]
+  [ -f "$TMP/quelle.bin-metadata.txt" ]
+}
+
+@test "Lokaler Clone mit -c warnt und klont trotzdem bitgenau" {
+  make_testfile "$TMP/quelle.bin" 4
+  : > "$TMP/ziel.bin"
+
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/ziel.bin" -f -c
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"keine Wirkung"* ]]
+  cmp -s "$TMP/quelle.bin" "$TMP/ziel.bin"
+}
