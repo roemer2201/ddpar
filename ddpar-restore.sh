@@ -14,6 +14,7 @@ REMOTE_HOST=""
 SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
 DEBUG=0
 ASSUME_YES=0
+SKIP_PREALLOC=0
 
 # Hilfemeldung anzeigen
 function show_help {
@@ -27,17 +28,19 @@ function show_help {
   echo "-r [n]                  Remote-Restore über SSH+Netcat (nur unkomprimiert)"
   echo "-R user@host            Angabe des Remote-Host, auf dem das Backup liegt"
   echo "-y                      Sicherheitsabfrage überspringen (assume yes)"
+  echo "-P                      Vorab-Reservierung des Zielplatzes (fallocate) überspringen"
   echo "-h, --help              Diese Hilfe anzeigen"
   echo ""
   echo "Die Anzahl der Jobs und Blockgröße kann nicht geändert werden. Sie wird beim Erstellen des Abbildes festgelegt."
 }
 
 # Verwendung von getopts zur Verarbeitung der Optionen
-while getopts ":i:o:r::R:yh" opt; do
+while getopts ":i:o:r::R:yPh" opt; do
   case $opt in
     i|-input) INPUT="$OPTARG";;
     o|-output) OUTPUT="$OPTARG";;
     y) ASSUME_YES=1;;
+    P) SKIP_PREALLOC=1;;
     r)
       REMOTE=1
       # Bisher ist nur Modus "n" (netcat, Datenkanal unverschlüsselt) implementiert.
@@ -279,11 +282,17 @@ function part_bytes {
 function restore_split_image {
   echo "Starte die Prozesse ..."
   if [[ ${OUTPUT_FILE_TYPE} != "block special"* ]]; then
-    echo "fallocate -l ${INPUT_SIZE} $OUTPUT_FILE"
-    if ! fallocate -l "${INPUT_SIZE}" "${OUTPUT_FILE}"; then
-      echo "Fehler: Speicherplatz für ${OUTPUT_FILE} konnte nicht reserviert werden (fallocate)."
-      INTERNAL_EXITCODE=1
-      return 1
+    if [ "$SKIP_PREALLOC" -eq 1 ]; then
+      echo "Vorab-Reservierung des Zielplatzes übersprungen (-P)."
+    elif ! command -v fallocate > /dev/null; then
+      echo "Warnung: fallocate ist nicht verfügbar, Vorab-Reservierung wird übersprungen."
+    else
+      echo "fallocate -l ${INPUT_SIZE} $OUTPUT_FILE"
+      if ! fallocate -l "${INPUT_SIZE}" "${OUTPUT_FILE}"; then
+        echo "Fehler: Speicherplatz für ${OUTPUT_FILE} konnte nicht reserviert werden (fallocate). Mit -P kann die Reservierung übersprungen werden."
+        INTERNAL_EXITCODE=1
+        return 1
+      fi
     fi
   fi
 
@@ -370,6 +379,21 @@ if [ $REMOTE -eq 1 ] && [ ! -z "$COMPRESSION" ]; then
   exit 1
 fi
 
+# Leserechte auf die Teil-Dateien vorab prüfen, damit der Restore nicht erst
+# mitten im parallelen Lauf an fehlenden Rechten scheitert (lokal; remote
+# liest der Remote-Host die Teile).
+if [ $REMOTE -ne 1 ]; then
+  if [ ! -z "$COMPRESSION" ]; then
+    FIRST_PART="${INPUT_FILES}0.gz"
+  else
+    FIRST_PART="${INPUT_FILES}0.part"
+  fi
+  if [ ! -r "$FIRST_PART" ]; then
+    echo "Fehler: ${FIRST_PART} existiert nicht oder ist nicht lesbar."
+    exit 1
+  fi
+fi
+
 # Überprüfung der erforderlichen Parameter
 if [ -z "$INPUT_PATH" ] || [ -z "$INPUT_FILE_BASENAME" ] || [ -z "$OUTPUT" ]; then
   echo "Fehlende Parameter. Bitte geben Sie alle erforderlichen Parameter an."
@@ -397,7 +421,8 @@ if [ -e $OUTPUT ]; then
         echo "Fehler: Nicht genügend Speicherplatz vorhanden für $INPUT_FILE_BASENAME in $OUTPUT ."
         exit 1
       fi
-      OUTPUT_FILE="$OUTPUT/$INPUT_FILE_BASENAME"
+      # Basename aus den Metadaten (FILE_NAME); Fallback: Basisname von -i
+      OUTPUT_FILE="$OUTPUT/${FILE_NAME:-$INPUT_FILE_BASENAME}"
       ;;
     # Wenn OUTPUT eine Datei ist (die bereits exitiert), prüfen, ob genügend freier Speicherplatz vorhanden ist.
     *)
@@ -420,11 +445,24 @@ else
       exit 1
     fi
   if [ -w "$OUTPUT_DIR" ]; then
-    touch $OUTPUT
+    touch "$OUTPUT"
   else
-    echo "Kein Schreibzugriff auf das Verzeichnis $OUTPUT_DIR vorhanden."
+    echo "Fehler: Kein Schreibzugriff auf das Verzeichnis $OUTPUT_DIR vorhanden."
+    exit 1
   fi
 
+fi
+
+# Schreibrechte vorab prüfen, damit der Restore nicht erst mitten im
+# parallelen Lauf an fehlenden Rechten scheitert.
+if [ -e "$OUTPUT_FILE" ]; then
+  if [ ! -w "$OUTPUT_FILE" ]; then
+    echo "Fehler: Keine Schreibrechte auf $OUTPUT_FILE."
+    exit 1
+  fi
+elif [ ! -w "$(dirname "$OUTPUT_FILE")" ]; then
+  echo "Fehler: Keine Schreibrechte auf das Verzeichnis $(dirname "$OUTPUT_FILE")."
+  exit 1
 fi
 
 echo "Nachfolgend werden die geteilten Dateien unter $INPUT_PATH/$INPUT_FILE_BASENAME nach $OUTPUT_FILE geschrieben."

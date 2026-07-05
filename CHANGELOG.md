@@ -1,5 +1,35 @@
 # Changelog
 
+## [Unreleased] – branch claude/ddpar-open-items-dawpvl (Quick Wins aus der To-Do-Liste)
+
+### Hinzugefügt
+- **ddpar.sh `-n NAME`:** eigener Basisname für die Backup-Dateien (Default
+  weiterhin der Basename der Eingabe); `FILE_NAME` in den Metadaten trägt den
+  tatsächlich verwendeten Basisnamen, `INPUT_FILE_NAME` weiterhin die Quelle
+- **ddpar-restore.sh `-P`:** überspringt die Vorab-Reservierung des Zielplatzes
+  (`fallocate`); fehlt `fallocate` auf dem System, wird nur gewarnt statt
+  abgebrochen
+- **Rechte-Vorabprüfung:** alle drei Skripte prüfen Lese- (Quelle, Teil-Dateien,
+  Metadaten) und Schreibrechte (Ziel bzw. Elternverzeichnis, bei Remote über
+  SSH) vor dem Start der parallelen Jobs — statt erst mitten im Lauf zu
+  scheitern
+- **ddpar-check.sh:** prüft vor einem Backup-/Restore-Check, ob die
+  `.sha256`-Dateien existieren, und bricht mit klarer Meldung ab, wenn das
+  Backup ohne `-s` erstellt wurde
+
+### Geändert
+- **Verfügbarkeits-Checks verdrahtet:** `check_commands_availability` bricht
+  bei fehlenden Befehlen jetzt ab (Ergebnis wurde bisher ignoriert) und wird
+  auch im Remote-Modus ausgeführt; `check_remote_commands_availability`
+  (bisher toter Code, 🛑 in der README-Matrix) läuft nach dem SSH-Aufbau und
+  prüft die benötigten Befehle auf dem Remote-Host. `nc` wird lokal nur noch
+  im Remote-Modus verlangt
+- **ddpar-restore.sh:** Restore in ein Verzeichnis hängt den Basename aus den
+  Metadaten (`FILE_NAME`) an statt des `-i`-Arguments; fehlender Schreibzugriff
+  auf das Zielverzeichnis führt zu Exit 1 (bisher nur Meldung + Weiterlauf)
+- **TESTING.md:** veralteten Hinweis „Clone-Check nicht implementiert“
+  entfernt und Abschnitt 3.3 (Clone-Check Source ↔ Destination) ergänzt
+
 ## [Unreleased] – branch claude/project-improvement-review-fe3jux (konsolidierter Stack)
 
 ### Hinzugefügt
