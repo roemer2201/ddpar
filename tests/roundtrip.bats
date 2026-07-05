@@ -93,3 +93,68 @@ load helpers
   [ "$status" -eq 0 ]
   cmp "$TMP/quelle.bin" "$TMP/ziel.bin"
 }
+
+@test "Backup mit eigenem Basisnamen (-n) und Restore daraus" {
+  make_testfile "$TMP/quelle.bin"
+  mkdir -p "$TMP/backup"
+
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -s -n eigenname
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/backup/eigenname-0.part" ]
+  [ -f "$TMP/backup/eigenname-metadata.txt" ]
+  grep -q "^FILE_NAME=eigenname$" "$TMP/backup/eigenname-metadata.txt"
+
+  vrun "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/backup/eigenname" -o "$TMP/restore.bin" -y
+  [ "$status" -eq 0 ]
+  cmp -s "$TMP/quelle.bin" "$TMP/restore.bin"
+}
+
+@test "ddpar.sh -n mit Schrägstrich im Namen scheitert" {
+  vrun "$REPO_ROOT/ddpar.sh" -i /etc/hostname -o "$TMP" -m backup -n "foo/bar"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Ungültiger Basisname"* ]]
+}
+
+@test "ddpar.sh mit nicht existierender Eingabe scheitert früh" {
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/gibtsnicht.bin" -o "$TMP" -m backup
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"existiert nicht"* ]]
+}
+
+@test "Restore in ein Verzeichnis nutzt den Basename aus den Metadaten" {
+  make_testfile "$TMP/quelle.bin"
+  mkdir -p "$TMP/backup" "$TMP/ziel"
+
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup
+  [ "$status" -eq 0 ]
+
+  vrun "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/backup/quelle.bin" -o "$TMP/ziel" -y
+  [ "$status" -eq 0 ]
+  cmp -s "$TMP/quelle.bin" "$TMP/ziel/quelle.bin"
+}
+
+@test "Restore mit -P überspringt die fallocate-Reservierung" {
+  make_testfile "$TMP/quelle.bin"
+  mkdir -p "$TMP/backup"
+
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup
+  [ "$status" -eq 0 ]
+
+  vrun "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/backup/quelle.bin" -o "$TMP/restore.bin" -y -P
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Vorab-Reservierung"* ]]
+  cmp -s "$TMP/quelle.bin" "$TMP/restore.bin"
+}
+
+@test "check gegen ein Backup ohne sha256-Dateien scheitert mit klarer Meldung" {
+  make_testfile "$TMP/quelle.bin"
+  mkdir -p "$TMP/backup"
+
+  # Backup bewusst OHNE -s erstellen
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup
+  [ "$status" -eq 0 ]
+
+  vrun "$REPO_ROOT/ddpar-check.sh" -s "$TMP/quelle.bin" -b "$TMP/backup/quelle.bin"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ohne Checksummen"* ]]
+}

@@ -157,8 +157,8 @@ sudo ./ddpar-restore.sh -i $BACKUP_DIR/sdb -o $DEST_DEV
 
 ## 3. Prüfung (ddpar-check.sh)
 
-> **Hinweis:** Die Prüfung eines Clones ist laut Status-Tabelle noch nicht implementiert (🛑).
-> Die folgenden Tests setzen ein vorhandenes Backup voraus.
+> **Hinweis:** Die Tests 3.1 und 3.2 setzen ein vorhandenes Backup voraus.
+> Der Clone-Check ohne Backup-Metadaten folgt in Test 3.3.
 
 ### 3.1 Quelle gegen Backup prüfen (Source ↔ Backup)
 
@@ -182,6 +182,21 @@ sudo ./ddpar-check.sh -b $BACKUP_DIR/sdb -d $DEST_DEV
 Datei:
 ```bash
 ./ddpar-check.sh -b $BACKUP_DIR/ddpar_test.img -d $DEST_DIR/ddpar_test.img
+```
+
+### 3.3 Clone prüfen (Source ↔ Destination, ohne Backup-Metadaten)
+
+Da beim Clone keine Metadatendatei existiert, müssen Jobs (und ggf.
+Blockgröße) wie beim Clone-Vorgang angegeben werden:
+
+Block Device:
+```bash
+sudo ./ddpar-check.sh -s $SOURCE_DEV -d $DEST_DEV -j 4
+```
+
+Datei:
+```bash
+./ddpar-check.sh -s $SOURCE_FILE -d $DEST_DIR/ddpar_test.img -j 4
 ```
 
 ---

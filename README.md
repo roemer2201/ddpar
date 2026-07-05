@@ -29,6 +29,9 @@ unterstützt: Ein nicht gleichmäßig verteilbarer Rest wird vom letzten Teil
 # Backup komprimiert (-c)
 ./ddpar.sh -i /dev/sdb -o /mnt/backup -m backup -s -c
 
+# Backup mit eigenem Basisnamen (-n): erzeugt /mnt/backup/mein-backup-0.part usw.
+./ddpar.sh -i /dev/sdb -o /mnt/backup -m backup -s -n mein-backup
+
 # Backup gegen die Quelle prüfen
 ./ddpar-check.sh -s /dev/sdb -b /mnt/backup/sdb
 
@@ -121,7 +124,7 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
 | execute_remote_command | :heavy_check_mark: |
 | execute_remote_background_command | :heavy_check_mark: |
 | close_ssh_connection | :heavy_check_mark: |
-| check_remote_command_availability | :stop_sign: |
+| check_remote_commands_availability | :heavy_check_mark: |
 | remote_port_generation | :heavy_check_mark: |
 | check_remote_port_availability | :heavy_check_mark: |
 | output_analysis | :heavy_check_mark: |
@@ -157,15 +160,8 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
 
 ## To Do
 
-- Lese-/Schreibrechte für `$SOURCE`, `$BACKUP_BASE` und `$DESTINATION` vorab prüfen
 - ddpar.sh:
-  - Option für einen eigenen `BASE_NAME` eines Backups
   - Checksummen/Kompression auch im Clone-Modus (analog Backup-Modus)
-- ddpar-check.sh:
-  - Prüfen, ob ein Backup überhaupt mit sha256-Dateien erstellt wurde, bevor verglichen wird
-- ddpar-restore.sh:
-  - Bei Datei-Restore prüfen, ob das Ziel eine Datei ist; bei Verzeichnis den Basename aus den Metadaten anhängen
-  - `fallocate` optional machen
 - `BASE_NAME` als Pfad für Checksummen-Dateien von Clones nutzen (wenn Checksummen angefordert)
 - Kompression + `-s`: Checksumme optional auch für die komprimierten Dateien berechnen (derzeit nur für die Rohdaten)
 - Remoting:

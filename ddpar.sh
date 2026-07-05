@@ -31,6 +31,7 @@ function show_help {
   echo "-m clone|backup         Ziel des Vorgangs (Default: clone)"
   echo "-j NUM                  Die Anzahl der Jobs (Default: 4)"
   echo "-b NUM                  Die Blockgröße in Bytes (Default: 1048576 Bytes (1 MiB))"
+  echo "-n NAME                 Eigener Basisname der Backup-Dateien (Default: Basename der Eingabe, nur -m backup)"
   echo "-c                      Komprimierung anfordern, Kompressionslevel zur Zeit nicht einstellbar (Default: -6)"
   echo "-s                      Checksumme der einzelnen Teile erstellen"
   echo "-f                      Force - ignore Probleme und erzwinge den Vorgang"
@@ -49,13 +50,20 @@ function show_help {
 function option_analysis {
   # Verwendung von getopts zur Verarbeitung der Optionen
   echo "Analysiere gegebene Optionen \"$*\""
-  while getopts ":i:o:m:j:b:r::R:csfhd" opt; do
+  while getopts ":i:o:m:j:b:n:r::R:csfhd" opt; do
     case $opt in
       i) INPUT="${OPTARG}";;
       o) OUTPUT="${OPTARG}";;
       m) MODE="${OPTARG}";;
       j) NUM_JOBS="${OPTARG}";;
       b) BLOCKSIZEBYTES="${OPTARG}";;
+      n)
+        if [[ "${OPTARG}" == */* ]]; then
+          echo -e "${ERRORCOLOR}Ungültiger Basisname '${OPTARG}': darf keinen Schrägstrich enthalten.${NOCOLOR}"
+          exit 1
+        fi
+        BASE_NAME="${OPTARG}"
+        ;;
       c)
 	    COMPRESSION=1
 		echo "COMPRESSION enabled."
@@ -291,8 +299,12 @@ function check_remote_commands_availability {
 
 function check_commands_availability {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    local commands=("dd" "nc" "df" "tee" "blockdev" "stat")  # Liste der zu überprüfenden Befehle
-    
+    local commands=("dd" "df" "tee" "blockdev" "stat")  # Liste der zu überprüfenden Befehle
+
+    if [ "$REMOTE" -eq 1 ]; then
+        commands+=("nc" "ssh")
+    fi
+
     if [ "$COMPRESSION" -eq 1 ]; then
         commands+=("gzip")
     fi
@@ -309,6 +321,33 @@ function check_commands_availability {
     done
     
     return 0  # Exit-Code 0, wenn alle Befehle verfügbar sind
+}
+
+function check_input_access {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	# Leserechte vorab prüfen, damit der Vorgang nicht erst mitten im
+	# parallelen Lauf an fehlenden Rechten scheitert.
+	if [ ! -e "${INPUT}" ]; then
+		echo -e "${ERRORCOLOR}Fehler: Eingabe ${INPUT} existiert nicht.${NOCOLOR}"
+		exit 1
+	fi
+	if [ ! -r "${INPUT}" ]; then
+		echo -e "${ERRORCOLOR}Fehler: Keine Leserechte auf ${INPUT}.${NOCOLOR}"
+		exit 1
+	fi
+}
+
+function check_output_access {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	# Schreibrechte vorab prüfen: Existiert das Ziel, muss es beschreibbar
+	# sein, andernfalls das Elternverzeichnis. Bei REMOTE=1 läuft die Prüfung
+	# über execute_command auf dem Remote-Host.
+	local parent
+	parent=$(dirname "${OUTPUT}")
+	if ! execute_command "{ [ -e \"${OUTPUT}\" ] && [ -w \"${OUTPUT}\" ]; } || { [ ! -e \"${OUTPUT}\" ] && [ -w \"${parent}\" ]; }"; then
+		echo -e "${ERRORCOLOR}Fehler: Keine Schreibrechte auf ${OUTPUT} (bzw. ${parent}).${NOCOLOR}"
+		exit 1
+	fi
 }
 
 function input_analysis {
@@ -599,7 +638,8 @@ function backup_mode {
 
 	# generate further spinoff variables
 	INPUT_FILE_NAME=$(basename "${INPUT}")
-	OUTPUT_FILE_NAME=${INPUT_FILE_NAME}
+	# Eigener Basisname via -n, sonst Basename der Eingabe
+	OUTPUT_FILE_NAME=${BASE_NAME:-${INPUT_FILE_NAME}}
 	OUTPUT_FILE="${OUTPUT}/${OUTPUT_FILE_NAME}-"
 	METADATA_FILE="${OUTPUT_FILE}metadata.txt"
 
@@ -618,7 +658,8 @@ function backup_mode {
 	fi
 
 	append_metadata "NUM_JOBS=${NUM_JOBS}"
-	append_metadata "FILE_NAME=${INPUT_FILE_NAME}"
+	# FILE_NAME = Basisname der Backup-Dateien (bei -n abweichend von INPUT_FILE_NAME)
+	append_metadata "FILE_NAME=${OUTPUT_FILE_NAME}"
 	append_metadata "BLOCKSIZEBYTES=${BLOCKSIZEBYTES}"
 	append_metadata "INPUT_SIZE=${INPUT_SIZE}"
 	append_metadata "INPUT_FILE_NAME=${INPUT_FILE_NAME}"
@@ -733,24 +774,25 @@ function cleanup_on_signal {
 trap cleanup_on_signal INT TERM
 set_colors
 option_analysis "$@"
+check_input_access
 input_analysis
 size_calculation
+if ! check_commands_availability; then
+    echo -e "${ERRORCOLOR}Fehler: Benötigte Befehle fehlen auf dem lokalen System.${NOCOLOR}"
+    exit 1
+fi
 if [ $REMOTE -eq 1 ]; then
     is_ssh_socket_alive
     if [ $? -ne 0 ]; then
-        #echo -e "${WARNCOLOR}Not yet implemented, please support at https://github.com/roemer2201/ddpar${NOCOLOR}"
-        #echo -e "${WARNCOLOR}This script will continue to run, but will end up in an undefined state.${NOCOLOR}"
-		# connect_ssh seems finished, warnings above removed
         connect_ssh
-        # check_commands_availability, auf remote ausführen
-        # Variablen übergeben, zB. $COMPRESSION usw.
-        
-        # Determine the type of the output file
     fi
-else
-    # local Output analysis
-    check_commands_availability
+    if ! check_remote_commands_availability; then
+        echo -e "${ERRORCOLOR}Fehler: Benötigte Befehle fehlen auf ${REMOTE_HOST}.${NOCOLOR}"
+        close_ssh_connection
+        exit 1
+    fi
 fi
+check_output_access
 output_analysis
 
 

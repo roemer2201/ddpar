@@ -199,7 +199,21 @@ function remote_part_hash {
   execute_remote_command "sha256sum '${BASE_FILES}${idx}.part'" | cut -d' ' -f1
 }
 
+function require_sha256_files {
+  # Prüft vorab, ob das Backup mit Checksummen-Dateien (-s) erstellt wurde.
+  # Ohne diese Prüfung liefe sha256sum -c gegen fehlende Dateien und
+  # produzierte pro Segment nur eine verwirrende Fehlermeldung.
+  local i
+  for ((i=0; i<NUM_JOBS; i++)); do
+    if [ ! -f "${BASE_FILES}${i}.sha256" ]; then
+      echo "Fehler: ${BASE_FILES}${i}.sha256 fehlt. Das Backup wurde ohne Checksummen (-s) erstellt oder ist unvollständig."
+      exit 1
+    fi
+  done
+}
+
 function check_restored_image {
+  [ $REMOTE -ne 1 ] && require_sha256_files
   for ((i=0; i<$NUM_JOBS; i++)); do
     if [ $REMOTE -eq 1 ]; then
       # Backup-Teile liegen remote (.part), Ziel ist lokal
@@ -223,6 +237,7 @@ function check_restored_image {
 }
 
 function check_backuped_image {
+  [ $REMOTE -ne 1 ] && require_sha256_files
   for ((i=0; i<$NUM_JOBS; i++)); do
     if [ $REMOTE -eq 1 ]; then
       # Quelle ist lokal, Backup-Teile liegen remote (.part)
@@ -356,6 +371,10 @@ if [ ! -z "${BASE_PATH}" ]; then
     fi
   else
     META_SRC="$METADATA_FILE"
+    if [ ! -r "$META_SRC" ]; then
+      echo "Fehler: Metadatendatei $META_SRC existiert nicht oder ist nicht lesbar."
+      exit 1
+    fi
   fi
   NUM_JOBS=$(grep "^NUM_JOBS=" "$META_SRC" | cut -d "=" -f 2)
   SPLIT_SIZE=$(grep "^SPLIT_SIZE=" "$META_SRC" | cut -d "=" -f 2)
@@ -380,6 +399,12 @@ if [ ! -z "${BASE_PATH}" ]; then
   echo ${BASE_FILES}\*
 fi
 if [ ! -z "$SOURCE" ]; then
+  # Leserechte vorab prüfen, damit die Prüfung nicht erst mitten im
+  # parallelen Lauf an fehlenden Rechten scheitert.
+  if [ ! -r "$SOURCE" ]; then
+    echo "Fehler: Quelle $SOURCE existiert nicht oder ist nicht lesbar."
+    exit 1
+  fi
   INPUT_FILE=$SOURCE
   INPUT_FILE_TYPE="$(file -b $SOURCE)"
 fi
@@ -389,6 +414,10 @@ if [ ! -z "$DESTINATION" ]; then
   if [ $REMOTE -eq 1 ] && [ -z "${BASE_PATH}" ]; then
     OUTPUT_FILE_TYPE=$(execute_remote_command "file -b '$DESTINATION'")
   else
+    if [ ! -r "$DESTINATION" ]; then
+      echo "Fehler: Ziel $DESTINATION existiert nicht oder ist nicht lesbar."
+      exit 1
+    fi
     OUTPUT_FILE_TYPE="$(file -b $DESTINATION)"
   fi
 fi
