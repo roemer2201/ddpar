@@ -155,6 +155,23 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
 | block dev | :stop_sign: |
 | file | :stop_sign: |
 
+<br>
+
+### Remote — Multi-NIC
+#### link detection & selection
+| |state|
+|-|-|
+| detect_local_nics (lokale NICs + Link-Geschwindigkeit ermitteln) | :stop_sign: |
+| check_nic_remote_reachability (Erreichbarkeit des Remote-Ziels je NIC, schnellste zuerst) | :stop_sign: |
+| exchange_remote_nic_info (Anzahl + Geschwindigkeit der Remote-NICs übermitteln) | :stop_sign: |
+| select_transfer_link (Logik zur Auswahl des sinnvollsten Links) | :stop_sign: |
+
+#### multi-link transfer
+| |state|
+|-|-|
+| multi_link_distribution (Übertragungen auf mehrere Links verteilen) | :stop_sign: |
+| weighted_link_distribution (Aufteilung im Verhältnis der Link-Geschwindigkeiten, z.B. 10GbE:1GbE) | :stop_sign: |
+
 ## To Do
 
 - Lese-/Schreibrechte für `$SOURCE`, `$BACKUP_BASE` und `$DESTINATION` vorab prüfen
@@ -171,3 +188,17 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
 - Remoting:
   - Verschlüsselter Datenkanal (`-r l`) und Remote-Kompression (`-r c`)
   - Remote-Eingabe mit lokaler Ausgabe (noch nicht durchdacht)
+  - Multi-NIC-Unterstützung (in dieser Reihenfolge umzusetzen):
+    1. **Lokale NIC-Erkennung:** Funktion, die prüft, ob mehrere NICs zur
+       Verfügung stehen; wenn ja, von der schnellsten abwärts prüfen, ob das
+       Remote-Ziel darüber erreichbar ist
+    2. **Remote-NIC-Inventar:** Anzahl und Geschwindigkeit der NICs des
+       Remote-Ziels übermitteln; eine eingebaute Logik entscheidet, welcher
+       Link für die Übertragung am meisten Sinn ergibt
+    3. **Multi-Link-Verteilung:** Sobald die Link-Auswahl funktioniert und
+       getestet ist, bei mehreren verfügbaren Links die Übertragungen auf
+       diese Links verteilen
+    4. **Gewichtete Verteilung:** Bei mehreren, unterschiedlich schnellen
+       Links die Übertragung im passenden Verhältnis aufteilen — z.B. bei
+       einem 10GbE- und einem 1GbE-Link läuft der Großteil über 10GbE,
+       ein einzelner Teil kann parallel über 1GbE laufen
