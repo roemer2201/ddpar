@@ -409,12 +409,15 @@ PATH="/tmp/fakebin:$PATH" ./ddpar-check.sh \
 
 ---
 
-## 5. Multi-NIC – Erkennung und Erreichbarkeit
+## 5. Multi-NIC – Erkennung, Erreichbarkeit und Link-Auswahl
 
-> **Hinweis:** Die Multi-NIC-Funktionen (Stufe 1) laufen bei jeder
-> Remote-Operation (`-r`/`-R`) automatisch vor dem SSH-Verbindungsaufbau und
-> sind derzeit rein informativ — die Übertragung nutzt weiterhin das
-> Standard-Routing. Automatisierte Unit-Tests: [`tests/nics.bats`](tests/nics.bats).
+> **Hinweis:** Die Multi-NIC-Funktionen laufen bei jeder Remote-Operation
+> (`-r`/`-R`) automatisch: Stufe 1 (lokale NICs + Erreichbarkeit) vor dem
+> SSH-Verbindungsaufbau, Stufe 2 (Remote-Inventar + Link-Auswahl) danach.
+> Der netcat-Datenkanal verbindet sich mit der von `select_transfer_link`
+> gewählten Remote-IP; schlägt die Auswahl fehl, mit der SSH-Adresse aus
+> `-R` (Standard-Routing). Automatisierte Unit-Tests:
+> [`tests/nics.bats`](tests/nics.bats).
 
 ### 5.1 NIC-Erkennung im Rahmen einer Remote-Operation
 
@@ -441,6 +444,21 @@ Ist das Ziel über keine NIC direkt erreichbar (z.B. ICMP gefiltert und kein
 offener SSH-Port), erscheint eine Warnung und der Vorgang läuft über das
 Standard-Routing weiter.
 
+Nach dem SSH-Aufbau folgt Stufe 2 — Remote-Inventar und Link-Auswahl:
+
+```
+Remote-Ziel meldet 2 aktive(s) Netzwerk-Interface(s):
+  eth1: 10000 Mbit/s, IPv4: 10.0.0.5
+  eth0: 1000 Mbit/s, IPv4: 192.168.1.100
+Prüfe Link-Kandidaten (höchste effektive Geschwindigkeit zuerst):
+  eth1 → 10.0.0.5 (eth1): erreichbar, effektiv 10000 Mbit/s
+Link-Auswahl: eth1 → 10.0.0.5 (eth1), effektiv 10000 Mbit/s
+```
+
+Anschließend verbinden sich die `nc`-Sender mit `10.0.0.5` statt mit der
+SSH-Adresse. Prüfen lässt sich das an den ausgegebenen Kommandozeilen
+(`dd if=… | nc 10.0.0.5 <PORT>`).
+
 ### 5.2 Funktionen isoliert aufrufen (ohne Klon-/Backup-Vorgang)
 
 Über den Source-Guard `DDPAR_SOURCE_ONLY=1` lassen sich die Funktionen ohne
@@ -457,10 +475,32 @@ bash -c '
 '
 ```
 
+Stufe 2 benötigt eine bestehende SSH-Master-Verbindung (Socket
+`/tmp/ssh_socket_ddpar`), da das Remote-Inventar per SSH abgefragt wird:
+
+```bash
+bash -c '
+  DDPAR_SOURCE_ONLY=1 source ./ddpar.sh
+  set_colors
+  REMOTE_HOST=user@192.168.1.100
+  connect_ssh
+  detect_local_nics
+  check_nic_remote_reachability
+  exchange_remote_nic_info
+  select_transfer_link
+  echo "Datenkanal-Ziel: $(remote_transfer_addr)"
+  close_ssh_connection
+'
+```
+
 > **Hinweis:** `detect_local_nics` liest Carrier/Geschwindigkeit aus
 > `/sys/class/net` (überschreibbar via `DDPAR_SYSFS_NET` für Tests) und die
-> IPv4-Adressen via `ip`. Die Erreichbarkeitsprüfung nutzt `ping -I <NIC>`
-> mit Fallback auf eine TCP-Probe des SSH-Ports (`nc -z -s <Quell-IP>`).
+> IPv4-Adressen via `ip`; `exchange_remote_nic_info` führt dieselbe Logik
+> POSIX-kompatibel auf dem Remote-Host aus. Die Erreichbarkeitsprüfung nutzt
+> `ping -I <NIC>` mit Fallback auf eine TCP-Probe des SSH-Ports
+> (`nc -z -s <Quell-IP>`). Bei gleicher effektiver Geschwindigkeit (z.B.
+> unbekannte Link-Geschwindigkeit = 0) probiert die Auswahl die jeweils
+> schnellere lokale bzw. Remote-NIC zuerst.
 
 ---
 

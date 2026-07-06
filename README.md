@@ -163,8 +163,8 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
 |-|-|
 | detect_local_nics (lokale NICs + Link-Geschwindigkeit ermitteln) | :heavy_check_mark: |
 | check_nic_remote_reachability (Erreichbarkeit des Remote-Ziels je NIC, schnellste zuerst) | :heavy_check_mark: |
-| exchange_remote_nic_info (Anzahl + Geschwindigkeit der Remote-NICs übermitteln) | :stop_sign: |
-| select_transfer_link (Logik zur Auswahl des sinnvollsten Links) | :stop_sign: |
+| exchange_remote_nic_info (Anzahl + Geschwindigkeit der Remote-NICs übermitteln) | :heavy_check_mark: |
+| select_transfer_link (Logik zur Auswahl des sinnvollsten Links) | :heavy_check_mark: |
 
 #### multi-link transfer
 | |state|
@@ -192,11 +192,14 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
     1. :heavy_check_mark: **Lokale NIC-Erkennung** (`detect_local_nics`,
        `check_nic_remote_reachability`): prüft, ob mehrere NICs zur Verfügung
        stehen, und von der schnellsten abwärts, ob das Remote-Ziel darüber
-       erreichbar ist — läuft bei Remote-Operationen automatisch, derzeit
-       rein informativ (die Übertragung nutzt noch das Standard-Routing)
-    2. **Remote-NIC-Inventar:** Anzahl und Geschwindigkeit der NICs des
-       Remote-Ziels übermitteln; eine eingebaute Logik entscheidet, welcher
-       Link für die Übertragung am meisten Sinn ergibt
+       erreichbar ist — läuft bei Remote-Operationen automatisch
+    2. :heavy_check_mark: **Remote-NIC-Inventar** (`exchange_remote_nic_info`,
+       `select_transfer_link`): Anzahl und Geschwindigkeit der Remote-NICs
+       werden per SSH übermittelt; die Auswahllogik wählt das Paar aus
+       lokaler NIC und Remote-IP mit der höchsten effektiven Geschwindigkeit
+       min(lokal, remote), dessen Erreichbarkeit bestätigt ist. Der
+       netcat-Datenkanal verbindet sich mit der gewählten Remote-IP; ohne
+       erfolgreiche Auswahl mit der SSH-Adresse (Standard-Routing)
     3. **Multi-Link-Verteilung:** Sobald die Link-Auswahl funktioniert und
        getestet ist, bei mehreren verfügbaren Links die Übertragungen auf
        diese Links verteilen

@@ -3,6 +3,17 @@
 ## [Unreleased] – branch claude/network-multi-nic-features-4om7f4
 
 ### Hinzugefügt
+- **Multi-NIC Stufe 2 (Link-Auswahl):** `exchange_remote_nic_info` fragt
+  über die SSH-Verbindung Anzahl, Geschwindigkeit und IPv4-Adressen der
+  Remote-NICs ab (POSIX-kompatibles Remote-Kommando, gleiche sysfs-Logik
+  wie lokal); `select_transfer_link` wählt das Paar aus erreichbarer
+  lokaler NIC und Remote-IP mit der höchsten effektiven Geschwindigkeit
+  min(lokal, remote) — bei Gleichstand (z.B. unbekannte Geschwindigkeit)
+  wird die jeweils schnellere NIC zuerst probiert (stabiler Sort). Der
+  netcat-Datenkanal (Clone und Backup) verbindet sich über
+  `remote_transfer_addr` mit der gewählten Remote-IP; ohne erfolgreiche
+  Auswahl weiterhin mit der SSH-Adresse aus `-R` (Standard-Routing).
+  Stufe 3 (Verteilung auf mehrere Links) folgt
 - **Multi-NIC Stufe 1 (informativ):** `detect_local_nics` ermittelt alle
   lokalen Interfaces mit aktivem Link samt Geschwindigkeit (sysfs) und
   primärer IPv4-Adresse, absteigend nach Geschwindigkeit sortiert;

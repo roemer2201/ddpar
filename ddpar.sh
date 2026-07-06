@@ -438,6 +438,125 @@ function check_nic_remote_reachability {
 	return 0
 }
 
+function exchange_remote_nic_info {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	# Multi-NIC Stufe 2a: Fragt über die bestehende SSH-Verbindung ab, wie
+	# viele NICs das Remote-Ziel hat und mit welcher Geschwindigkeit. Das
+	# Remote-Kommando ist POSIX-kompatibel (Remote-Shell kann dash sein) und
+	# nutzt dieselbe sysfs-Logik wie detect_local_nics. Ergebnis in globalen
+	# Arrays, absteigend nach Geschwindigkeit sortiert:
+	#   REMOTE_NICS[i]/REMOTE_NIC_SPEEDS[i]/REMOTE_NIC_IPS[i]
+	REMOTE_NICS=()
+	REMOTE_NIC_SPEEDS=()
+	REMOTE_NIC_IPS=()
+
+	local inventory_cmd='for n in /sys/class/net/*; do i=$(basename "$n"); [ "$i" = "lo" ] && continue; [ "$(cat "$n/carrier" 2>/dev/null)" = "1" ] || continue; s=$(cat "$n/speed" 2>/dev/null); case "$s" in ""|*[!0-9]*) s=0;; esac; a=$(ip -4 -o addr show dev "$i" scope global 2>/dev/null | head -n1 | tr -s " " | cut -d" " -f4 | cut -d/ -f1); echo "$s $i $a"; done'
+	local inventory
+	inventory=$(execute_remote_command "${inventory_cmd}")
+	if [ -z "${inventory}" ]; then
+		echo -e "${WARNCOLOR}[WARN] Remote-NIC-Inventar konnte nicht ermittelt werden.${NOCOLOR}"
+		return 1
+	fi
+
+	local speed nic nic_ip
+	while read -r speed nic nic_ip; do
+		[ -n "${nic}" ] || continue
+		# Defensive Prüfung, falls die Remote-Seite Unerwartetes liefert
+		case "${speed}" in ''|*[!0-9]*) speed=0;; esac
+		REMOTE_NICS+=("${nic}")
+		REMOTE_NIC_SPEEDS+=("${speed}")
+		REMOTE_NIC_IPS+=("${nic_ip}")
+	done < <(printf '%s\n' "${inventory}" | sort -rn -k1,1)
+
+	if [ ${#REMOTE_NICS[@]} -eq 0 ]; then
+		echo -e "${WARNCOLOR}[WARN] Remote-NIC-Inventar konnte nicht ermittelt werden.${NOCOLOR}"
+		return 1
+	fi
+
+	echo -e "${INFOCOLOR}Remote-Ziel meldet ${#REMOTE_NICS[@]} aktive(s) Netzwerk-Interface(s):${NOCOLOR}"
+	local i
+	for i in "${!REMOTE_NICS[@]}"; do
+		echo -e "${INFOCOLOR}  ${REMOTE_NICS[$i]}: ${REMOTE_NIC_SPEEDS[$i]} Mbit/s, IPv4: ${REMOTE_NIC_IPS[$i]:-keine}${NOCOLOR}"
+	done
+	return 0
+}
+
+function select_transfer_link {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	# Multi-NIC Stufe 2b: Wählt aus den erreichbaren lokalen NICs (Stufe 1b)
+	# und dem Remote-Inventar (Stufe 2a) das Paar mit der höchsten effektiven
+	# Geschwindigkeit min(lokal, remote), dessen Remote-IP über die lokale
+	# NIC tatsächlich erreichbar ist. Unbekannte Geschwindigkeiten (0) werden
+	# zuletzt probiert. Ergebnis:
+	#   SELECTED_LOCAL_NIC/SELECTED_LOCAL_IP     gewählte lokale Seite
+	#   SELECTED_REMOTE_NIC/SELECTED_REMOTE_IP   gewählte Remote-Seite
+	#   SELECTED_LINK_SPEED                      effektive Geschwindigkeit (Mbit/s)
+	# Rückgabe 1 (und leere SELECTED_*-Variablen): keine optimierte Auswahl
+	# möglich, der Datenkanal nutzt dann die SSH-Adresse (remote_transfer_addr).
+	SELECTED_LOCAL_NIC=""
+	SELECTED_LOCAL_IP=""
+	SELECTED_REMOTE_NIC=""
+	SELECTED_REMOTE_IP=""
+	SELECTED_LINK_SPEED=""
+
+	if [ ${#REACHABLE_NICS[@]} -eq 0 ] || [ ${#REMOTE_NICS[@]} -eq 0 ]; then
+		echo -e "${WARNCOLOR}[WARN] Keine Link-Auswahl möglich: lokale Erreichbarkeitsprüfung oder Remote-Inventar fehlt.${NOCOLOR}"
+		return 1
+	fi
+
+	# Kandidatenpaare (lokale NIC, Remote-NIC) mit effektiver Geschwindigkeit
+	local i j eff
+	local candidates=()
+	for i in "${!REACHABLE_NICS[@]}"; do
+		for j in "${!REMOTE_NICS[@]}"; do
+			# Remote-NICs ohne IPv4-Adresse sind kein netcat-Ziel
+			[ -n "${REMOTE_NIC_IPS[$j]}" ] || continue
+			eff=$(( REACHABLE_NIC_SPEEDS[i] < REMOTE_NIC_SPEEDS[j] ? REACHABLE_NIC_SPEEDS[i] : REMOTE_NIC_SPEEDS[j] ))
+			candidates+=("${eff} ${i} ${j}")
+		done
+	done
+	if [ ${#candidates[@]} -eq 0 ]; then
+		echo -e "${WARNCOLOR}[WARN] Keine Link-Auswahl möglich: Remote-Ziel meldet keine IPv4-Adressen.${NOCOLOR}"
+		return 1
+	fi
+
+	echo -e "${INFOCOLOR}Prüfe Link-Kandidaten (höchste effektive Geschwindigkeit zuerst):${NOCOLOR}"
+	# Stabiler Sort (-s): bei gleicher effektiver Geschwindigkeit (z.B.
+	# unbekannt = 0) bleibt die Erzeugungsreihenfolge erhalten, d.h. die
+	# jeweils schnellere lokale bzw. Remote-NIC wird zuerst probiert.
+	local local_nic local_ip remote_nic remote_ip
+	while read -r eff i j; do
+		local_nic=${REACHABLE_NICS[$i]}
+		local_ip=${REACHABLE_NIC_IPS[$i]}
+		remote_nic=${REMOTE_NICS[$j]}
+		remote_ip=${REMOTE_NIC_IPS[$j]}
+		if nic_can_reach_remote "${local_nic}" "${local_ip}" "${remote_ip}"; then
+			echo -e "${SUCCESSCOLOR}  ${local_nic} → ${remote_ip} (${remote_nic}): erreichbar, effektiv ${eff} Mbit/s${NOCOLOR}"
+			SELECTED_LOCAL_NIC=${local_nic}
+			SELECTED_LOCAL_IP=${local_ip}
+			SELECTED_REMOTE_NIC=${remote_nic}
+			SELECTED_REMOTE_IP=${remote_ip}
+			SELECTED_LINK_SPEED=${eff}
+			break
+		else
+			echo -e "${INFOCOLOR}  ${local_nic} → ${remote_ip} (${remote_nic}): nicht erreichbar${NOCOLOR}"
+		fi
+	done < <(printf '%s\n' "${candidates[@]}" | sort -srn -k1,1)
+
+	if [ -z "${SELECTED_REMOTE_IP}" ]; then
+		echo -e "${WARNCOLOR}[WARN] Kein Link-Kandidat erreichbar.${NOCOLOR}"
+		return 1
+	fi
+	echo -e "${SUCCESSCOLOR}Link-Auswahl: ${SELECTED_LOCAL_NIC} → ${SELECTED_REMOTE_IP} (${SELECTED_REMOTE_NIC}), effektiv ${SELECTED_LINK_SPEED} Mbit/s${NOCOLOR}"
+	return 0
+}
+
+function remote_transfer_addr {
+	# Zieladresse für den netcat-Datenkanal: die von select_transfer_link
+	# gewählte Remote-IP; ohne Auswahl die SSH-Adresse aus REMOTE_HOST.
+	echo "${SELECTED_REMOTE_IP:-${REMOTE_HOST#*@}}"
+}
+
 function input_analysis {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
   # Determine the type of the input file
@@ -625,8 +744,8 @@ function run_clone_parts {
 				echo -e "${ERRORCOLOR}Remote-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				return 1
 			fi
-			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
-			"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+			echo -e "${INFOCOLOR}${dd_in[*]} | nc $(remote_transfer_addr) ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | nc "$(remote_transfer_addr)" "${CURRENT_REMOTE_PORT}" &
 		else
 			echo -e "${INFOCOLOR}${dd_in[*]} | ${dd_out[*]}${NOCOLOR}"
 			"${dd_in[@]}" | "${dd_out[@]}" &
@@ -778,8 +897,8 @@ function backup_mode {
 				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				break
 			fi
-			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
-			"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+			echo -e "${INFOCOLOR}${dd_in[*]} | nc $(remote_transfer_addr) ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | nc "$(remote_transfer_addr)" "${CURRENT_REMOTE_PORT}" &
 		elif [ $CHECKSUM -eq 1 ] && [ $COMPRESSION -eq 1 ]; then
 			echo -e "${INFOCOLOR}${dd_in[*]} | tee >(sha256sum > ${PART_BASE}.sha256) | gzip -${COMPRESSION_LEVEL} > ${PART_BASE}.gz${NOCOLOR}"
 			"${dd_in[@]}" | tee >(sha256sum > "${PART_BASE}.sha256") | gzip -"${COMPRESSION_LEVEL}" > "${PART_BASE}.gz" &
@@ -870,9 +989,8 @@ size_calculation
 if [ $REMOTE -eq 1 ]; then
     # Multi-NIC (Stufe 1): lokale Interfaces samt Geschwindigkeit ermitteln
     # und die Erreichbarkeit des Remote-Ziels je NIC prüfen (schnellste
-    # zuerst). Derzeit rein informativ — die Übertragung nutzt weiterhin das
-    # Standard-Routing; die Link-Auswahl (select_transfer_link) folgt in
-    # einer späteren Stufe.
+    # zuerst). Das Ergebnis (REACHABLE_NICS) ist die Grundlage für die
+    # Link-Auswahl in Stufe 2 nach dem SSH-Aufbau.
     if detect_local_nics; then
         if ! check_nic_remote_reachability; then
             echo -e "${WARNCOLOR}[WARN] NIC-Erreichbarkeitsprüfung ohne Ergebnis, es wird das Standard-Routing verwendet.${NOCOLOR}"
@@ -886,8 +1004,20 @@ if [ $REMOTE -eq 1 ]; then
         connect_ssh
         # check_commands_availability, auf remote ausführen
         # Variablen übergeben, zB. $COMPRESSION usw.
-        
+
         # Determine the type of the output file
+    fi
+    # Multi-NIC (Stufe 2): Remote-NIC-Inventar über die SSH-Verbindung
+    # abfragen und den Link mit der höchsten effektiven Geschwindigkeit
+    # wählen. Der netcat-Datenkanal verbindet sich dann mit der gewählten
+    # Remote-IP (remote_transfer_addr); ohne erfolgreiche Auswahl bleibt es
+    # bei der SSH-Adresse aus REMOTE_HOST.
+    if [ ${#REACHABLE_NICS[@]} -gt 0 ]; then
+        if exchange_remote_nic_info; then
+            if ! select_transfer_link; then
+                echo -e "${WARNCOLOR}[WARN] Keine optimierte Link-Auswahl möglich, netcat nutzt die SSH-Adresse ${REMOTE_HOST#*@}.${NOCOLOR}"
+            fi
+        fi
     fi
 else
     # local Output analysis
