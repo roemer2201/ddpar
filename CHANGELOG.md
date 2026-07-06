@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased] – branch claude/ddpar-open-items-dawpvl (Checksummen für komprimierte Dateien)
+
+### Hinzugefügt
+- **ddpar.sh:** Backup mit `-c -s` erzeugt je Teil zusätzlich eine
+  `.gz.sha256`-Datei mit der Checksumme der komprimierten Datei (die
+  Rohdaten-`.sha256` bleibt unverändert für den Vergleich mit Quelle/Ziel)
+- **ddpar-check.sh Selbst-Check (`-b` ohne `-s`/`-d`):** prüft die
+  Teil-Dateien eines Backups gegen die gespeicherten Checksummen. Bei
+  komprimierten Backups wird zuerst die `.gz`-Datei ohne Dekompression gegen
+  ihre `.gz.sha256` geprüft (falls vorhanden), anschließend der entpackte
+  Inhalt gegen die Rohdaten-`.sha256`. Bisher war `-b` alleine ein Fehler
+  („Only one of the three variables is set")
+
 ## [Unreleased] – branch claude/ddpar-open-items-dawpvl (Clone-Checksummen + komprimierter Remote-Transfer)
 
 ### Hinzugefügt

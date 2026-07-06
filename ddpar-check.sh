@@ -26,7 +26,10 @@ function show_help {
   echo "Verwendung: $SCRIPT_NAME [Optionen]"
   echo ""
   echo "Optionen:"
-  echo "-b PATH         Der Basisname (opt. mit Pfad) des geteilten Abbildes"
+  echo "-b PATH         Der Basisname (opt. mit Pfad) des geteilten Abbildes."
+  echo "                Ohne -s/-d: Selbst-Check des Backups gegen die gespeicherten"
+  echo "                .sha256-Dateien (komprimierte Backups zusätzlich ohne"
+  echo "                Dekompression über die .gz.sha256-Dateien, falls vorhanden)"
   echo "-s PATH         Source to compare against"
   echo "-d PATH         Destination to compare against"
   echo "-j NUM          Anzahl der Jobs für den Clone-Check (Default: 4, nur ohne -b)"
@@ -266,6 +269,27 @@ function check_backuped_image {
   done
 }
 
+function check_backup_files {
+  # Selbst-Check ohne Quelle/Ziel: prüft die Teil-Dateien des Backups gegen
+  # die beim Backup gespeicherten Checksummen. Bei komprimierten Backups wird
+  # zuerst die .gz-Datei gegen ihre .gz.sha256 geprüft (ohne Dekompression),
+  # anschließend der entpackte Inhalt gegen die Rohdaten-.sha256.
+  require_sha256_files
+  for ((i=0; i<NUM_JOBS; i++)); do
+    if [ -n "$COMPRESSION" ]; then
+      (
+        if [ -f "${BASE_FILES}${i}.gz.sha256" ]; then
+          sha256sum -c "${BASE_FILES}${i}.gz.sha256" < "${BASE_FILES}${i}.gz" | sed "s#-#${BASE_FILES}${i}.gz#" || exit 1
+        fi
+        zcat "${BASE_FILES}${i}.gz" | sha256sum -c "${BASE_FILES}${i}.sha256" | sed "s#-#${BASE_FILES}${i} (entpackt)#"
+      ) &
+    else
+      sha256sum -c "${BASE_FILES}${i}.sha256" < "${BASE_FILES}${i}.part" | sed "s#-#${BASE_FILES}${i}.part#" &
+    fi
+    register_job $! "Segment $i (backup-selfcheck)"
+  done
+}
+
 function check_cloned_image {
   # Vergleicht Quelle und Ziel eines Clones segmentweise und parallel.
   # Es existieren keine .sha256-Dateien, daher werden die Hashes beider
@@ -341,9 +365,10 @@ fi
 # by making sure, that only 2 out of those 3 parameters are set.
 # Currently only backup <-> destination works.
 
-# Check if only one of the three variables is set
+# Check if only one of the three variables is set.
+# Ausnahme: -b alleine ist der Selbst-Check des Backups gegen die
+# gespeicherten Checksummen (siehe check_backup_files).
 if { [ -n "$SOURCE" ] && [ -z "$BASE_PATH" ] && [ -z "$DESTINATION" ]; } \
-|| { [ -z "$SOURCE" ] && [ -n "$BASE_PATH" ] && [ -z "$DESTINATION" ]; } \
 || { [ -z "$SOURCE" ] && [ -z "$BASE_PATH" ] && [ -n "$DESTINATION" ]; }; then
   echo "Only one of the three variables is set."
   exit 1
@@ -459,6 +484,18 @@ if [ -z "$SOURCE" ] && [ -n "$BASE_PATH" ] && [ -n "$DESTINATION" ]; then
     check_restored_image
   fi
 
+fi
+
+# Nur -b gesetzt: Selbst-Check des Backups gegen die gespeicherten Checksummen
+if [ -z "$SOURCE" ] && [ -n "$BASE_PATH" ] && [ -z "$DESTINATION" ]; then
+  if [ $REMOTE -eq 1 ]; then
+    echo "Der Selbst-Check (-b ohne -s/-d) benötigt lokale .sha256-Dateien; Remote-Backups werden ohne sie erstellt."
+    close_ssh_connection
+    exit 1
+  fi
+  echo "In the loop: Selbst-Check des Backups ${BASE_FILES}* gegen die gespeicherten Checksummen ..."
+  echo "Beginning to check ..."
+  check_backup_files
 fi
 
 # Check if only $SOURCE and $DESTINATION are set (Clone-Check)

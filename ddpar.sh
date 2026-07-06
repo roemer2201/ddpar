@@ -37,7 +37,8 @@ function show_help {
   echo "-c                      Komprimierung anfordern, Kompressionslevel zur Zeit nicht einstellbar (Default: -6)."
   echo "                        Im Clone-Modus nur bei Remote wirksam (komprimierter Transfer)"
   echo "-s                      Checksumme der einzelnen Teile erstellen (Clone: .sha256- und Metadatendatei"
-  echo "                        am Basis-Pfad aus -n, prüfbar mit ddpar-check.sh -b BASE -d ZIEL)"
+  echo "                        am Basis-Pfad aus -n, prüfbar mit ddpar-check.sh -b BASE -d ZIEL)."
+  echo "                        Mit -c entsteht zusätzlich je Teil eine .gz.sha256 der komprimierten Datei"
   echo "-f                      Force - ignore Probleme und erzwinge den Vorgang"
   echo "-r [lnc]                Remote-Verbindung, nur SSH möglich. Remote-Optionen: siehe unten"
   echo "-R user@host            Angabe des Remote-Host"
@@ -801,8 +802,11 @@ function backup_mode {
 			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
 			"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
 		elif [ $CHECKSUM -eq 1 ] && [ $COMPRESSION -eq 1 ]; then
-			echo -e "${INFOCOLOR}${dd_in[*]} | tee >(sha256sum > ${PART_BASE}.sha256) | gzip -${COMPRESSION_LEVEL} > ${PART_BASE}.gz${NOCOLOR}"
-			"${dd_in[@]}" | tee >(sha256sum > "${PART_BASE}.sha256") | gzip -"${COMPRESSION_LEVEL}" > "${PART_BASE}.gz" &
+			# Zwei Checksummen je Teil: .sha256 für die Rohdaten (Vergleich mit
+			# Quelle/Ziel) und .gz.sha256 für die komprimierte Datei (Selbst-Check
+			# des Backups ohne Dekompression, siehe ddpar-check.sh -b).
+			echo -e "${INFOCOLOR}${dd_in[*]} | tee >(sha256sum > ${PART_BASE}.sha256) | gzip -${COMPRESSION_LEVEL} | tee >(sha256sum > ${PART_BASE}.gz.sha256) > ${PART_BASE}.gz${NOCOLOR}"
+			"${dd_in[@]}" | tee >(sha256sum > "${PART_BASE}.sha256") | gzip -"${COMPRESSION_LEVEL}" | tee >(sha256sum > "${PART_BASE}.gz.sha256") > "${PART_BASE}.gz" &
 		elif [ $COMPRESSION -eq 1 ]; then
 			echo -e "${INFOCOLOR}${dd_in[*]} | gzip -${COMPRESSION_LEVEL} > ${PART_BASE}.gz${NOCOLOR}"
 			"${dd_in[@]}" | gzip -"${COMPRESSION_LEVEL}" > "${PART_BASE}.gz" &

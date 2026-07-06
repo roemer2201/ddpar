@@ -200,3 +200,48 @@ load helpers
   [[ "$output" == *"keine Wirkung"* ]]
   cmp -s "$TMP/quelle.bin" "$TMP/ziel.bin"
 }
+
+@test "Backup -c -s erzeugt .gz.sha256; Selbst-Check (-b) bestätigt und erkennt Manipulation" {
+  make_testfile "$TMP/quelle.bin"
+  mkdir -p "$TMP/backup"
+
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -c -s
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/backup/quelle.bin-0.sha256" ]
+  [ -f "$TMP/backup/quelle.bin-0.gz.sha256" ]
+
+  vrun "$REPO_ROOT/ddpar-check.sh" -b "$TMP/backup/quelle.bin"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+  [[ "$output" != *"FAILED"* ]]
+
+  # Komprimierte Datei manipulieren -> Selbst-Check muss fehlschlagen
+  printf 'tampered' | dd of="$TMP/backup/quelle.bin-1.gz" bs=1 seek=4 conv=notrunc status=none
+  vrun "$REPO_ROOT/ddpar-check.sh" -b "$TMP/backup/quelle.bin"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FAILED"* ]]
+}
+
+@test "Selbst-Check (-b) eines unkomprimierten Backups mit -s ist erfolgreich" {
+  make_testfile "$TMP/quelle.bin"
+  mkdir -p "$TMP/backup"
+
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup -s
+  [ "$status" -eq 0 ]
+
+  vrun "$REPO_ROOT/ddpar-check.sh" -b "$TMP/backup/quelle.bin"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"FAILED"* ]]
+}
+
+@test "Selbst-Check (-b) ohne sha256-Dateien scheitert mit klarer Meldung" {
+  make_testfile "$TMP/quelle.bin"
+  mkdir -p "$TMP/backup"
+
+  vrun "$REPO_ROOT/ddpar.sh" -i "$TMP/quelle.bin" -o "$TMP/backup" -m backup
+  [ "$status" -eq 0 ]
+
+  vrun "$REPO_ROOT/ddpar-check.sh" -b "$TMP/backup/quelle.bin"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ohne Checksummen"* ]]
+}

@@ -208,6 +208,18 @@ sudo ./ddpar.sh -i $SOURCE_DEV -o $DEST_DEV -s -n /tmp/clone-sums
 sudo ./ddpar-check.sh -b /tmp/clone-sums -d $DEST_DEV
 ```
 
+### 3.4 Selbst-Check eines Backups (nur -b)
+
+Prüft die Teil-Dateien eines mit `-s` erstellten Backups gegen die
+gespeicherten Checksummen — ohne Quelle oder Ziel. Bei komprimierten Backups
+(`-c -s`) wird zuerst die `.gz`-Datei ohne Dekompression gegen ihre
+`.gz.sha256` geprüft, anschließend der entpackte Inhalt gegen die
+Rohdaten-`.sha256`:
+
+```bash
+./ddpar-check.sh -b $BACKUP_DIR/ddpar_test.img
+```
+
 ---
 
 ## 4. Remote Tests – SSH + Netcat

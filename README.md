@@ -35,6 +35,10 @@ unterstützt: Ein nicht gleichmäßig verteilbarer Rest wird vom letzten Teil
 # Backup gegen die Quelle prüfen
 ./ddpar-check.sh -s /dev/sdb -b /mnt/backup/sdb
 
+# Selbst-Check: Backup gegen seine gespeicherten Checksummen prüfen (ohne Quelle/Ziel;
+# komprimierte Backups werden zusätzlich ohne Dekompression über .gz.sha256 geprüft)
+./ddpar-check.sh -b /mnt/backup/sdb
+
 # Wiederherstellen (Jobs/Blockgröße kommen aus der Metadatendatei)
 ./ddpar-restore.sh -i /mnt/backup/sdb -o /dev/sdc
 
@@ -175,7 +179,6 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
 
 ## To Do
 
-- Kompression + `-s`: Checksumme optional auch für die komprimierten Dateien berechnen (derzeit nur für die Rohdaten)
 - Remoting:
   - Verschlüsselter Datenkanal (`-r l`)
   - `-s` beim Remote-Backup: .sha256-Dateien auf dem Remote-Host erzeugen (derzeit Warnung; Prüfung via `ddpar-check.sh -r` funktioniert ohne sie)
