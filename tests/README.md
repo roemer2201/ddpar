@@ -42,6 +42,11 @@ sodass `make test` auch ohne root/SSH grün bleibt.
   standardmäßig `localhost` (über `DDPAR_REMOTE_TEST_HOST` überschreibbar):
   Remote-Clone (Datei) sowie Remote-Backup→Remote-Restore (Datei). Ohne
   passwortlose SSH-Verbindung werden die Tests übersprungen.
+- `nics.bats` – **Multi-NIC Stufe 1** (kein root/SSH nötig): `detect_local_nics`
+  gegen einen Fake-sysfs-Baum (`DDPAR_SYSFS_NET`) und
+  `check_nic_remote_reachability` mit `ping`/`nc`-Stubs im `PATH`. Die
+  Funktionen werden über den Source-Guard (`DDPAR_SOURCE_ONLY=1`) aus
+  `ddpar.sh` geladen.
 - `helpers.bash` – gemeinsames `setup`/`teardown` (isoliertes Temp-Verzeichnis,
   automatisches Lösen von Loop-Devices/SSH-Socket) sowie `make_testfile`,
   `loop_setup`, `require_block_support`, `require_remote_support`.

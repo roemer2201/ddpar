@@ -409,11 +409,66 @@ PATH="/tmp/fakebin:$PATH" ./ddpar-check.sh \
 
 ---
 
-## 5. Zusatzoptionen
+## 5. Multi-NIC – Erkennung und Erreichbarkeit
+
+> **Hinweis:** Die Multi-NIC-Funktionen (Stufe 1) laufen bei jeder
+> Remote-Operation (`-r`/`-R`) automatisch vor dem SSH-Verbindungsaufbau und
+> sind derzeit rein informativ — die Übertragung nutzt weiterhin das
+> Standard-Routing. Automatisierte Unit-Tests: [`tests/nics.bats`](tests/nics.bats).
+
+### 5.1 NIC-Erkennung im Rahmen einer Remote-Operation
+
+Jede Remote-Operation gibt vor dem Verbindungsaufbau die gefundenen
+Interfaces und die Erreichbarkeit des Ziels aus:
+
+```bash
+sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r n -R $REMOTE_HOST
+```
+
+Erwartung (Beispiel mit zwei NICs):
+
+```
+2 aktive(s) Netzwerk-Interface(s) gefunden:
+  eth1: 10000 Mbit/s, IPv4: 10.0.0.5
+  eth0: 1000 Mbit/s, IPv4: 192.168.1.5
+Prüfe Erreichbarkeit von 192.168.1.100 je Interface (schnellste zuerst):
+  eth1 (10000 Mbit/s): 192.168.1.100 nicht erreichbar
+  eth0 (1000 Mbit/s): 192.168.1.100 erreichbar
+Schnellste erreichbare NIC: eth0 (1000 Mbit/s)
+```
+
+Ist das Ziel über keine NIC direkt erreichbar (z.B. ICMP gefiltert und kein
+offener SSH-Port), erscheint eine Warnung und der Vorgang läuft über das
+Standard-Routing weiter.
+
+### 5.2 Funktionen isoliert aufrufen (ohne Klon-/Backup-Vorgang)
+
+Über den Source-Guard `DDPAR_SOURCE_ONLY=1` lassen sich die Funktionen ohne
+Hauptprogramm laden und einzeln testen:
+
+```bash
+bash -c '
+  DDPAR_SOURCE_ONLY=1 source ./ddpar.sh
+  set_colors
+  detect_local_nics
+  REMOTE_HOST=user@192.168.1.100
+  check_nic_remote_reachability
+  echo "FASTEST_REACHABLE_NIC=$FASTEST_REACHABLE_NIC"
+'
+```
+
+> **Hinweis:** `detect_local_nics` liest Carrier/Geschwindigkeit aus
+> `/sys/class/net` (überschreibbar via `DDPAR_SYSFS_NET` für Tests) und die
+> IPv4-Adressen via `ip`. Die Erreichbarkeitsprüfung nutzt `ping -I <NIC>`
+> mit Fallback auf eine TCP-Probe des SSH-Ports (`nc -z -s <Quell-IP>`).
+
+---
+
+## 6. Zusatzoptionen
 
 Die folgenden Optionen können mit den meisten Szenarien oben kombiniert werden.
 
-### 5.1 Checksummen aktivieren (-s)
+### 6.1 Checksummen aktivieren (-s)
 
 Beim Backup wird pro Teil eine SHA256-Checksumme erstellt:
 
@@ -421,7 +476,7 @@ Beim Backup wird pro Teil eine SHA256-Checksumme erstellt:
 ./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -s
 ```
 
-### 5.2 Anzahl der Jobs anpassen (-j)
+### 6.2 Anzahl der Jobs anpassen (-j)
 
 > Die Eingabegröße muss nicht durch die Anzahl der Jobs teilbar sein — ein
 > Rest wird vom letzten Teil übertragen.
@@ -431,13 +486,13 @@ Beim Backup wird pro Teil eine SHA256-Checksumme erstellt:
 ./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -j 8
 ```
 
-### 5.3 Blockgröße anpassen (-b)
+### 6.3 Blockgröße anpassen (-b)
 
 ```bash
 ./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -b 4194304
 ```
 
-### 5.4 Debug-Modus (-d)
+### 6.4 Debug-Modus (-d)
 
 > **Achtung:** Im Debug-Modus werden Passwörter im Klartext ausgegeben.
 
@@ -445,7 +500,7 @@ Beim Backup wird pro Teil eine SHA256-Checksumme erstellt:
 ./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -d
 ```
 
-### 5.5 Force-Modus (-f)
+### 6.5 Force-Modus (-f)
 
 Überschreibt vorhandene Dateien oder ignoriert Speicherplatz-Warnungen:
 

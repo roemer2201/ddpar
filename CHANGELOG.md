@@ -1,5 +1,25 @@
 # Changelog
 
+## [Unreleased] – branch claude/network-multi-nic-features-4om7f4
+
+### Hinzugefügt
+- **Multi-NIC Stufe 1 (informativ):** `detect_local_nics` ermittelt alle
+  lokalen Interfaces mit aktivem Link samt Geschwindigkeit (sysfs) und
+  primärer IPv4-Adresse, absteigend nach Geschwindigkeit sortiert;
+  `check_nic_remote_reachability` prüft von der schnellsten NIC abwärts, ob
+  das Remote-Ziel erreichbar ist (`ping -I`, Fallback: TCP-Probe auf den
+  SSH-Port mit Source-IP-Binding) und liefert `FASTEST_REACHABLE_NIC`.
+  Läuft bei Remote-Operationen automatisch vor dem SSH-Aufbau; die
+  Übertragung nutzt weiterhin das Standard-Routing (Link-Auswahl folgt in
+  Stufe 2)
+- Source-Guard `DDPAR_SOURCE_ONLY=1`: `ddpar.sh` lässt sich für Unit-Tests
+  sourcen, ohne dass der Hauptteil läuft; `DDPAR_SYSFS_NET` macht den
+  sysfs-Pfad für Tests überschreibbar
+- `tests/nics.bats`: Unit-Tests für beide Funktionen (Fake-sysfs-Baum,
+  `ping`/`nc`-Stubs); TESTING.md-Kapitel 5 mit manuellen Multi-NIC-Szenarien
+- README: Multi-NIC-Roadmap (4 Stufen) im To Do und Funktionsstatus-Abschnitt
+  „Remote — Multi-NIC"
+
 ## [Unreleased] – branch claude/project-improvement-review-fe3jux (konsolidierter Stack)
 
 ### Hinzugefügt

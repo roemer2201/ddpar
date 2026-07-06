@@ -311,6 +311,133 @@ function check_commands_availability {
     return 0  # Exit-Code 0, wenn alle Befehle verfügbar sind
 }
 
+function detect_local_nics {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	# Multi-NIC Stufe 1a: Ermittelt alle lokalen Netzwerk-Interfaces mit
+	# aktivem Link (Carrier) samt Link-Geschwindigkeit und primärer
+	# IPv4-Adresse. Ergebnis in globalen Arrays, absteigend nach
+	# Geschwindigkeit sortiert (schnellste NIC zuerst):
+	#   LOCAL_NICS[i]        Interface-Name (z.B. eth0)
+	#   LOCAL_NIC_SPEEDS[i]  Link-Geschwindigkeit in Mbit/s (0 = unbekannt)
+	#   LOCAL_NIC_IPS[i]     primäre IPv4-Adresse (leer = keine)
+	# DDPAR_SYSFS_NET erlaubt Tests mit einem nachgebauten sysfs-Baum.
+	local sysfs_net="${DDPAR_SYSFS_NET:-/sys/class/net}"
+	LOCAL_NICS=()
+	LOCAL_NIC_SPEEDS=()
+	LOCAL_NIC_IPS=()
+
+	local nic_path nic speed nic_ip
+	local unsorted=()
+	for nic_path in "${sysfs_net}"/*; do
+		[ -e "${nic_path}" ] || continue
+		nic=$(basename "${nic_path}")
+		# Loopback ist für Remote-Übertragungen irrelevant
+		[ "${nic}" = "lo" ] && continue
+		# Nur Interfaces mit aktivem Link berücksichtigen (carrier == 1;
+		# bei heruntergefahrenen Interfaces schlägt das Lesen fehl)
+		[ "$(cat "${nic_path}/carrier" 2>/dev/null)" = "1" ] || continue
+		# Link-Geschwindigkeit in Mbit/s; -1 oder unlesbar (z.B. WLAN,
+		# virtio) wird als 0 = unbekannt behandelt und zuletzt einsortiert
+		speed=$(cat "${nic_path}/speed" 2>/dev/null)
+		if ! [[ "${speed}" =~ ^[0-9]+$ ]]; then
+			speed=0
+		fi
+		# Primäre IPv4-Adresse (für Source-Binding der Erreichbarkeitsprüfung)
+		nic_ip=$(ip -4 -o addr show dev "${nic}" scope global 2>/dev/null | awk 'NR==1 {sub(/\/.*/, "", $4); print $4}')
+		unsorted+=("${speed} ${nic} ${nic_ip}")
+	done
+
+	if [ ${#unsorted[@]} -eq 0 ]; then
+		echo -e "${WARNCOLOR}[WARN] Keine aktiven Netzwerk-Interfaces gefunden.${NOCOLOR}"
+		return 1
+	fi
+
+	# Absteigend nach Geschwindigkeit sortieren (schnellste zuerst)
+	while read -r speed nic nic_ip; do
+		LOCAL_NICS+=("${nic}")
+		LOCAL_NIC_SPEEDS+=("${speed}")
+		LOCAL_NIC_IPS+=("${nic_ip}")
+	done < <(printf '%s\n' "${unsorted[@]}" | sort -rn -k1,1)
+
+	echo -e "${INFOCOLOR}${#LOCAL_NICS[@]} aktive(s) Netzwerk-Interface(s) gefunden:${NOCOLOR}"
+	local i
+	for i in "${!LOCAL_NICS[@]}"; do
+		echo -e "${INFOCOLOR}  ${LOCAL_NICS[$i]}: ${LOCAL_NIC_SPEEDS[$i]} Mbit/s, IPv4: ${LOCAL_NIC_IPS[$i]:-keine}${NOCOLOR}"
+	done
+	return 0
+}
+
+function nic_can_reach_remote {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	# Prüft, ob das Ziel $3 über das Interface $1 (primäre IPv4 $2) erreichbar
+	# ist. Zuerst ICMP mit Interface-Binding (ping -I); falls ICMP gefiltert
+	# wird oder ping fehlt, TCP-Probe auf den SSH-Port 22 mit Source-IP-Binding.
+	local nic=$1
+	local src_ip=$2
+	local target=$3
+
+	if command -v ping > /dev/null 2>&1; then
+		if ping -c 1 -W 2 -I "${nic}" "${target}" > /dev/null 2>&1; then
+			return 0
+		fi
+	fi
+	if [ -n "${src_ip}" ]; then
+		if nc -z -w 2 -s "${src_ip}" "${target}" 22 > /dev/null 2>&1; then
+			return 0
+		fi
+	fi
+	return 1
+}
+
+function check_nic_remote_reachability {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	# Multi-NIC Stufe 1b: Prüft von der schnellsten NIC abwärts, ob das
+	# Remote-Ziel (REMOTE_HOST, ohne user@-Prefix) über das jeweilige
+	# Interface erreichbar ist. Erwartet, dass detect_local_nics vorher
+	# gelaufen ist. Ergebnis in globalen Arrays, absteigend nach
+	# Geschwindigkeit sortiert:
+	#   REACHABLE_NICS[i]/REACHABLE_NIC_SPEEDS[i]/REACHABLE_NIC_IPS[i]
+	# FASTEST_REACHABLE_NIC enthält die schnellste erreichbare NIC.
+	local remote_addr=${REMOTE_HOST#*@}
+	REACHABLE_NICS=()
+	REACHABLE_NIC_SPEEDS=()
+	REACHABLE_NIC_IPS=()
+	FASTEST_REACHABLE_NIC=""
+
+	if [ -z "${remote_addr}" ]; then
+		echo -e "${ERRORCOLOR}Fehler: Kein Remote-Host angegeben.${NOCOLOR}"
+		return 1
+	fi
+	if [ ${#LOCAL_NICS[@]} -eq 0 ]; then
+		echo -e "${ERRORCOLOR}Fehler: Keine lokalen NICs bekannt. detect_local_nics muss zuerst laufen.${NOCOLOR}"
+		return 1
+	fi
+
+	echo -e "${INFOCOLOR}Prüfe Erreichbarkeit von ${remote_addr} je Interface (schnellste zuerst):${NOCOLOR}"
+	local i nic speed nic_ip
+	for i in "${!LOCAL_NICS[@]}"; do
+		nic=${LOCAL_NICS[$i]}
+		speed=${LOCAL_NIC_SPEEDS[$i]}
+		nic_ip=${LOCAL_NIC_IPS[$i]}
+		if nic_can_reach_remote "${nic}" "${nic_ip}" "${remote_addr}"; then
+			echo -e "${SUCCESSCOLOR}  ${nic} (${speed} Mbit/s): ${remote_addr} erreichbar${NOCOLOR}"
+			REACHABLE_NICS+=("${nic}")
+			REACHABLE_NIC_SPEEDS+=("${speed}")
+			REACHABLE_NIC_IPS+=("${nic_ip}")
+		else
+			echo -e "${INFOCOLOR}  ${nic} (${speed} Mbit/s): ${remote_addr} nicht erreichbar${NOCOLOR}"
+		fi
+	done
+
+	if [ ${#REACHABLE_NICS[@]} -eq 0 ]; then
+		echo -e "${WARNCOLOR}[WARN] ${remote_addr} ist über keine NIC direkt erreichbar.${NOCOLOR}"
+		return 1
+	fi
+	FASTEST_REACHABLE_NIC="${REACHABLE_NICS[0]}"
+	echo -e "${SUCCESSCOLOR}Schnellste erreichbare NIC: ${FASTEST_REACHABLE_NIC} (${REACHABLE_NIC_SPEEDS[0]} Mbit/s)${NOCOLOR}"
+	return 0
+}
+
 function input_analysis {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
   # Determine the type of the input file
@@ -730,12 +857,27 @@ function cleanup_on_signal {
 ################
 # Script Start #
 ################
+# Test-Hook: Mit DDPAR_SOURCE_ONLY=1 gesourct werden nur die Funktionen
+# geladen, der Hauptteil läuft nicht (für Unit-Tests, siehe tests/nics.bats).
+if [ "${DDPAR_SOURCE_ONLY:-0}" -eq 1 ]; then
+	return 0 2>/dev/null || exit 0
+fi
 trap cleanup_on_signal INT TERM
 set_colors
 option_analysis "$@"
 input_analysis
 size_calculation
 if [ $REMOTE -eq 1 ]; then
+    # Multi-NIC (Stufe 1): lokale Interfaces samt Geschwindigkeit ermitteln
+    # und die Erreichbarkeit des Remote-Ziels je NIC prüfen (schnellste
+    # zuerst). Derzeit rein informativ — die Übertragung nutzt weiterhin das
+    # Standard-Routing; die Link-Auswahl (select_transfer_link) folgt in
+    # einer späteren Stufe.
+    if detect_local_nics; then
+        if ! check_nic_remote_reachability; then
+            echo -e "${WARNCOLOR}[WARN] NIC-Erreichbarkeitsprüfung ohne Ergebnis, es wird das Standard-Routing verwendet.${NOCOLOR}"
+        fi
+    fi
     is_ssh_socket_alive
     if [ $? -ne 0 ]; then
         #echo -e "${WARNCOLOR}Not yet implemented, please support at https://github.com/roemer2201/ddpar${NOCOLOR}"

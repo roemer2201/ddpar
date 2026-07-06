@@ -161,8 +161,8 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
 #### link detection & selection
 | |state|
 |-|-|
-| detect_local_nics (lokale NICs + Link-Geschwindigkeit ermitteln) | :stop_sign: |
-| check_nic_remote_reachability (Erreichbarkeit des Remote-Ziels je NIC, schnellste zuerst) | :stop_sign: |
+| detect_local_nics (lokale NICs + Link-Geschwindigkeit ermitteln) | :heavy_check_mark: |
+| check_nic_remote_reachability (Erreichbarkeit des Remote-Ziels je NIC, schnellste zuerst) | :heavy_check_mark: |
 | exchange_remote_nic_info (Anzahl + Geschwindigkeit der Remote-NICs übermitteln) | :stop_sign: |
 | select_transfer_link (Logik zur Auswahl des sinnvollsten Links) | :stop_sign: |
 
@@ -189,9 +189,11 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
   - Verschlüsselter Datenkanal (`-r l`) und Remote-Kompression (`-r c`)
   - Remote-Eingabe mit lokaler Ausgabe (noch nicht durchdacht)
   - Multi-NIC-Unterstützung (in dieser Reihenfolge umzusetzen):
-    1. **Lokale NIC-Erkennung:** Funktion, die prüft, ob mehrere NICs zur
-       Verfügung stehen; wenn ja, von der schnellsten abwärts prüfen, ob das
-       Remote-Ziel darüber erreichbar ist
+    1. :heavy_check_mark: **Lokale NIC-Erkennung** (`detect_local_nics`,
+       `check_nic_remote_reachability`): prüft, ob mehrere NICs zur Verfügung
+       stehen, und von der schnellsten abwärts, ob das Remote-Ziel darüber
+       erreichbar ist — läuft bei Remote-Operationen automatisch, derzeit
+       rein informativ (die Übertragung nutzt noch das Standard-Routing)
     2. **Remote-NIC-Inventar:** Anzahl und Geschwindigkeit der NICs des
        Remote-Ziels übermitteln; eine eingebaute Logik entscheidet, welcher
        Link für die Übertragung am meisten Sinn ergibt
