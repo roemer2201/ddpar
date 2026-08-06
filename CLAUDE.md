@@ -55,7 +55,9 @@ Manuelle Tests: siehe `TESTING.md`.
 
 ## Bekannte Einschränkungen / offene Baustellen
 
-- Remote Backup, Remote Restore und Remote Checks (netcat, unkomprimiert) sind implementiert; komprimierter Remote-Transfer fehlt noch (🛑 in README)
+- Remote Backup, Remote Restore und Remote Checks (netcat) sind implementiert — unkomprimiert und mit **lokaler [De]Kompression** (`-c` + `-r n`: gzip/zcat laufen lokal, die Gegenseite schreibt/liest nur `.gz`-Dateien und braucht kein gzip)
+- Offen bleibt Kompression auf der Remote-Seite (`-r c`) sowie `-c` im Clone-Modus (wird dort mit Warnung ignoriert)
+- `-s` (Checksummen-Dateien) wird im Remote-Modus nicht angewendet; Remote-Backups prüft man mit `ddpar-check.sh -r` über Laufzeit-Hashes
 - Remote Checks (`ddpar-check.sh -r`) vergleichen nur SHA256-Hashes je Segment (lokal vs. per SSH) — kein netcat-Datentransfer nötig
 - `RANDOM` in Bash liefert nur 0–32767 → Remote-Ports werden aus dem Bereich 10000–42767 gewählt
 - `fallocate` funktioniert nicht auf Block-Devices (wird korrekt übersprungen)

@@ -233,11 +233,17 @@ sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r l -R $REMOTE_HOST
 
 ### 4.4 Remote Clone – Block Device, lokale Kompression (Modus n + -c)
 
-Daten werden lokal mit gzip komprimiert, dann per Netcat übertragen und remote dekomprimiert.
+> **Noch nicht implementiert.** Ein Clone müsste auf der Remote-Seite wieder
+> dekomprimiert werden (remote decompression). `-c` wird im Clone-Modus
+> ignoriert; das Skript gibt eine Warnung aus. Kompression steht im
+> Backup-Modus zur Verfügung (Test 4.13).
 
 ```bash
 sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r n -c -R $REMOTE_HOST
 ```
+
+> Erwartung: Warnung „Kompression (-c) ist im Clone-Modus noch nicht
+> implementiert“, danach unkomprimierter Clone.
 
 ### 4.5 Remote Clone – Block Device, remote Kompression (Modus c)
 
@@ -250,8 +256,8 @@ sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r c -R $REMOTE_HOST
 ### 4.6 Remote Backup – Block Device, unkomprimiert (Modus n)
 
 Die Split-Teile werden per Netcat zum `$REMOTE_HOST` übertragen und dort als
-`*.part`-Dateien abgelegt. Die Übertragung ist unkomprimiert und ohne Prüfsumme
-(`-c`/`-s` werden auf dem Remote-Pfad nicht angewendet).
+`*.part`-Dateien abgelegt. Die Übertragung ist hier unkomprimiert und ohne
+Prüfsumme (`-s` wird auf dem Remote-Pfad nicht angewendet, `-c` siehe Test 4.13).
 
 ```bash
 sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_BACKUP_DIR -m backup -r n -R $REMOTE_HOST
@@ -309,7 +315,7 @@ mit aufsteigenden Ports sowie lokal `dd if=… | nc localhost <PORT> &`.
 
 Die Backup-Teile liegen auf dem `$REMOTE_HOST`; das Zielgerät `-o` ist **lokal**.
 Der Remote-Host sendet die Teile per Netcat, lokal werden sie empfangen und
-geschrieben. Nur unkomprimiert (komprimierte Backups werden remote abgelehnt).
+geschrieben. Komprimierte Backups siehe Test 4.13 (Dekompression lokal).
 Der `-i`-Basispfad ist der Pfad **auf dem Remote-Host** ohne abschließendes `-`.
 
 ```bash
@@ -366,10 +372,11 @@ Ports und Offsets.
 
 ### 4.10 Remote Check – Quelle gegen Remote-Backup (Source ↔ Backup)
 
-> **Hinweis:** Der Remote-Check überträgt **keine** Nutzdaten über netcat – die
-> SHA256-Hashes werden je Segment lokal bzw. per SSH auf dem Remote-Host berechnet
-> und nur verglichen. Nur unkomprimierte Remote-Backups werden unterstützt; die
-> `-b`-Seite liegt auf dem Remote-Host.
+> **Hinweis:** Der Remote-Check überträgt **keine** Nutzdaten über netcat – bei
+> unkomprimierten Backups werden die SHA256-Hashes je Segment lokal bzw. per SSH
+> auf dem Remote-Host berechnet und nur verglichen. Bei komprimierten Backups
+> holt der Check die `.gz`-Teile über SSH und packt sie **lokal** aus
+> (local decompression, Test 4.13). Die `-b`-Seite liegt auf dem Remote-Host.
 
 ```bash
 ./ddpar-check.sh -s $SOURCE_FILE -b $REMOTE_BACKUP_DIR/ddpar_test.img -r n -R $REMOTE_HOST
@@ -421,6 +428,56 @@ chmod +x /tmp/fakebin/ssh
 PATH="/tmp/fakebin:$PATH" ./ddpar-check.sh \
   -s /tmp/ddpartest/in.img -b /tmp/ddpar_backup/in.img -r n -R localhost
 ```
+
+### 4.13 Remote mit lokaler [De]Kompression (Modus n + -c)
+
+> **Prinzip:** gzip/zcat laufen auf der **lokalen** Maschine. Über das Netz geht
+> nur der komprimierte Strom, die Remote-Seite schreibt bzw. liest die
+> `.gz`-Teile mit `dd` und benötigt **kein gzip**. Die Metadatendatei enthält
+> `COMPRESSION=1` und `COMPRESSION_LEVEL`, sodass Restore und Check den
+> komprimierten Pfad automatisch erkennen.
+
+#### 4.13.1 Remote Backup, komprimiert (Block Device und Datei)
+
+```bash
+sudo ./ddpar.sh -i $SOURCE_DEV  -o $REMOTE_BACKUP_DIR -m backup -c -r n -R $REMOTE_HOST
+     ./ddpar.sh -i $SOURCE_FILE -o $REMOTE_BACKUP_DIR -m backup -c -r n -R $REMOTE_HOST
+```
+
+> Erwartung: pro Teil eine Zeile
+> `dd if=… | gzip -6 | nc <host> <PORT>` sowie auf dem Remote-Host
+> `nc -N -l <PORT> | dd of=…-N.gz`.
+> Erzeugte Dateien auf dem Remote-Host: `$REMOTE_BACKUP_DIR/sdb-0.gz` …
+> `sdb-3.gz` + `sdb-metadata.txt` (mit `COMPRESSION=1`) — **keine** `.part`-Dateien.
+
+#### 4.13.2 Remote Restore aus komprimiertem Backup
+
+```bash
+sudo ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/sdb -o $DEST_DEV -r n -R $REMOTE_HOST
+     ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/ddpar_test.img -o $DEST_DIR/ddpar_test.img -r n -R $REMOTE_HOST
+```
+
+> **Voraussetzung:** Ein Remote-Backup aus Test 4.13.1.
+> Erwartung: `Source is remote (compressed, local decompression)` und pro Teil
+> `nc <host> <PORT> | zcat | dd of=… seek=…`.
+
+#### 4.13.3 Remote Check eines komprimierten Backups
+
+```bash
+./ddpar-check.sh -s $SOURCE_FILE -b $REMOTE_BACKUP_DIR/ddpar_test.img -r n -R $REMOTE_HOST
+sudo ./ddpar-check.sh -b $REMOTE_BACKUP_DIR/sdb -d $DEST_DEV -r n -R $REMOTE_HOST
+```
+
+> Erwartung: `Segment N: OK (<hash>)` je Segment. Die `.gz`-Teile werden über
+> SSH geholt und lokal ausgepackt; die Hashes beziehen sich auf die **Rohdaten**
+> des Segments, sind also mit denen eines unkomprimierten Backups identisch.
+
+#### 4.13.4 Hinweise / bekannte Grenzen
+
+- `-s` (Checksummen-Dateien) wird im Remote-Modus nicht angewendet; das Skript
+  weist darauf hin. Die Prüfung erfolgt über `ddpar-check.sh -r`.
+- Der Clone-Modus unterstützt `-c` noch nicht (siehe Test 4.4).
+- Kompression auf der Remote-Seite (`-r c`) ist weiterhin offen.
 
 ---
 

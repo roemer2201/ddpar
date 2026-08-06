@@ -60,9 +60,22 @@ unterstützt: Ein nicht gleichmäßig verteilbarer Rest wird vom letzten Teil
 ./ddpar.sh -i /dev/sdb -o /remote/backup -m backup -r n -R user@zielhost
 ./ddpar-restore.sh -i /remote/backup/sdb -o /dev/sdc -r n -R user@zielhost
 
+# Remote-Backup komprimiert (-c): gzip läuft lokal, der Remote-Host braucht kein gzip
+./ddpar.sh -i /dev/sdb -o /remote/backup -m backup -c -r n -R user@zielhost
+# Restore daraus: zcat läuft ebenfalls lokal (die Kompression steht in den Metadaten)
+./ddpar-restore.sh -i /remote/backup/sdb -o /dev/sdc -r n -R user@zielhost
+
 # Remote-Check (nur SHA256-Hashes laufen über SSH)
 ./ddpar-check.sh -s /dev/sdb -b /remote/backup/sdb -r n -R user@zielhost
 ```
+
+**Kompression im Remote-Modus (`-c` zusammen mit `-r n`)** arbeitet als *local
+[de]compression*: `gzip` bzw. `zcat` laufen auf der lokalen Maschine, über das
+Netz geht nur der komprimierte Strom, und die Gegenseite schreibt bzw. liest die
+`.gz`-Teile mit `dd`. Das spart Bandbreite und setzt auf dem Remote-Host kein
+`gzip` voraus. Beim Check eines komprimierten Remote-Backups werden die
+`.gz`-Teile über SSH geholt und lokal ausgepackt; verglichen werden die Hashes
+der Rohdaten.
 
 **Sicherheitshinweise zum Remote-Modus:**
 
@@ -141,10 +154,13 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
 | file | :heavy_check_mark: (:heavy_check_mark:) | | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 
 #### local [de]compression
+Kompression/Dekompression laufen lokal, über netcat geht nur der komprimierte
+Strom; die Remote-Seite benötigt kein `gzip`.
+
 | | backup gzip (check) | restore gzip (check) |
 |-|----------|----------|
-| block dev | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
-| file | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
+| block dev | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
+| file | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 
 #### remote [de]compression
 | | backup gzip (check) | restore gzip (check) |
@@ -161,7 +177,10 @@ Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
 ## To Do
 
 - ddpar.sh:
-  - Checksummen/Kompression auch im Clone-Modus (analog Backup-Modus)
+  - Checksummen/Kompression auch im Clone-Modus (analog Backup-Modus; `-c` wird
+    dort derzeit mit einer Warnung ignoriert)
+  - `-s` im Remote-Modus: `.sha256`-Dateien auf der Gegenseite ablegen (heute
+    prüft man Remote-Backups mit `ddpar-check.sh -r` über Laufzeit-Hashes)
 - `BASE_NAME` als Pfad für Checksummen-Dateien von Clones nutzen (wenn Checksummen angefordert)
 - Kompression + `-s`: Checksumme optional auch für die komprimierten Dateien berechnen (derzeit nur für die Rohdaten)
 - Remoting:

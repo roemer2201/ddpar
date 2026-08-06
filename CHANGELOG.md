@@ -1,5 +1,37 @@
 # Changelog
 
+## [Unreleased] – branch claude/remote-netcat-local-compression-z8sk5b (Remote netcat mit lokaler [De]Kompression)
+
+### Hinzugefügt
+- **Remote-Backup komprimiert (`-c` + `-r n`):** `gzip` läuft auf der lokalen
+  Maschine, über netcat geht nur der komprimierte Strom, die Gegenseite schreibt
+  ihn per `dd` in die `.gz`-Teile (*local compression*). Der Remote-Host benötigt
+  dafür kein `gzip`. `COMPRESSION`/`COMPRESSION_LEVEL` landen jetzt auch bei
+  Remote-Backups in der Metadatendatei
+- **Remote-Restore komprimiert:** der Remote-Host sendet die `.gz`-Teile
+  unverändert, `zcat` läuft lokal (*local decompression*). Der bisherige Abbruch
+  „Remote-Restore unterstützt derzeit nur unkomprimierte Backups“ entfällt;
+  erkannt wird der Fall automatisch über `COMPRESSION` aus den Metadaten
+- **Remote-Check komprimierter Backups:** `ddpar-check.sh -r` holt die
+  `.gz`-Teile über SSH und packt sie lokal aus; verglichen werden weiterhin die
+  SHA256-Hashes der Rohdaten je Segment (unkomprimiert bleibt es beim
+  `sha256sum` auf der Gegenseite, es geht nur der Hash über die Leitung)
+- **Tests:** `tests/remote.bats` deckt Backup→Restore mit `-c` (inkl. nicht
+  glatt teilbarer Größe) sowie Remote-Check komprimierter Backups positiv und
+  negativ ab; `testing-docker/run-remote-tests.sh` bekommt ein Szenario für den
+  komprimierten Zwei-Host-Durchlauf
+
+### Geändert
+- **Warnungen statt stillem Ignorieren:** `-c` im Clone-Modus und `-s` im
+  Remote-Modus werden erkennbar gemeldet, statt wirkungslos zu bleiben
+- **`check_remote_commands_availability`:** verlangt kein `gzip` mehr auf dem
+  Remote-Host (komprimiert wird lokal); `ddpar-restore.sh` prüft dafür lokal auf
+  `zcat` sowie im Remote-Modus auf `ssh`/`nc`
+
+### Behoben
+- **ddpar-restore.sh Port-Prüfung:** `grep -qE ":PORT[^0-9]"` statt `grep -q
+  ":PORT"` — ein belegter Port 12345 galt sonst auch für Port 1234 als belegt
+
 ## [Unreleased] – branch claude/ddpar-open-items-dawpvl (Quick Wins aus der To-Do-Liste)
 
 ### Hinzugefügt
