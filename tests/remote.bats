@@ -9,8 +9,8 @@
 # für normale Entwickler grün bleibt. In der CI richtet ein eigener Job
 # SSH-zu-localhost ein und führt diese Datei aus.
 #
-# Abgedeckt wird der unkomprimierte netcat-Pfad (Modus n): Clone (Datei),
-# Backup (Datei) und Restore (Datei).
+# Abgedeckt wird der netcat-Pfad (Modus n): Clone (Datei), Backup (Datei) und
+# Restore (Datei), jeweils unkomprimiert sowie mit lokaler [De]Kompression (-c).
 
 load helpers
 
@@ -50,4 +50,66 @@ remote_teardown() {
   [ "$status" -eq 0 ]
 
   cmp "$TMP/src.bin" "$TMP/restored.bin"
+}
+
+@test "Remote Backup -> Remote Restore Datei (-r n -c, lokale [De]Kompression) ist bitgenau" {
+  require_remote_support
+  command -v gzip >/dev/null 2>&1 || skip "gzip nicht verfügbar"
+
+  # Nicht glatt teilbare Größe, damit auch der Rest-Teil (part_bytes) mitgeprüft wird
+  make_testfile "$TMP/src.bin"
+  truncate -s +12345 "$TMP/src.bin"
+  mkdir -p "$TMP/rbackup"
+
+  run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rbackup" -m backup -c -r n -R "$REMOTE_TEST_HOST"
+  remote_teardown
+  [ "$status" -eq 0 ]
+  # Komprimiert wird lokal, auf der Gegenseite landen .gz-Teile
+  [ -f "$TMP/rbackup/src.bin-0.gz" ]
+  [ ! -f "$TMP/rbackup/src.bin-0.part" ]
+  grep -q "^COMPRESSION=1" "$TMP/rbackup/src.bin-metadata.txt"
+  grep -q "^COMPRESSION_LEVEL=" "$TMP/rbackup/src.bin-metadata.txt"
+
+  run "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/rbackup/src.bin" -o "$TMP/restored.bin" -r n -R "$REMOTE_TEST_HOST" -y
+  remote_teardown
+  [ "$status" -eq 0 ]
+
+  cmp "$TMP/src.bin" "$TMP/restored.bin"
+}
+
+@test "Remote check bestätigt ein komprimiertes Remote-Backup gegen die Quelle" {
+  require_remote_support
+  command -v gzip >/dev/null 2>&1 || skip "gzip nicht verfügbar"
+
+  make_testfile "$TMP/src.bin"
+  mkdir -p "$TMP/rbackup"
+
+  run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rbackup" -m backup -c -r n -R "$REMOTE_TEST_HOST"
+  remote_teardown
+  [ "$status" -eq 0 ]
+
+  run "$REPO_ROOT/ddpar-check.sh" -s "$TMP/src.bin" -b "$TMP/rbackup/src.bin" -r n -R "$REMOTE_TEST_HOST"
+  remote_teardown
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Prüfung erfolgreich"* ]]
+}
+
+@test "Remote check erkennt ein manipuliertes komprimiertes Remote-Backup" {
+  require_remote_support
+  command -v gzip >/dev/null 2>&1 || skip "gzip nicht verfügbar"
+
+  make_testfile "$TMP/src.bin"
+  mkdir -p "$TMP/rbackup"
+
+  run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rbackup" -m backup -c -r n -R "$REMOTE_TEST_HOST"
+  remote_teardown
+  [ "$status" -eq 0 ]
+
+  # Quelle nachträglich verändern -> die Hashes dürfen nicht mehr passen
+  printf 'XXXXXXXX' | dd of="$TMP/src.bin" bs=1 seek=1000 conv=notrunc status=none
+
+  run "$REPO_ROOT/ddpar-check.sh" -s "$TMP/src.bin" -b "$TMP/rbackup/src.bin" -r n -R "$REMOTE_TEST_HOST"
+  remote_teardown
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"MISMATCH"* ]]
 }

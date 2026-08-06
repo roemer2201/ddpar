@@ -25,7 +25,8 @@ function show_help {
   echo "Optionen:"
   echo "-i, --input PATH        Der Basisname des geteilten Abbildes (bei Remote: Pfad auf dem Remote-Host)"
   echo "-o, --output PATH       Vollständiger Pfad des (lokalen) Zielgeräts"
-  echo "-r [n]                  Remote-Restore über SSH+Netcat (nur unkomprimiert)"
+  echo "-r [n]                  Remote-Restore über SSH+Netcat. Komprimierte Backups werden"
+  echo "                        unterstützt: die Dekompression läuft lokal (local decompression)"
   echo "-R user@host            Angabe des Remote-Host, auf dem das Backup liegt"
   echo "-y                      Sicherheitsabfrage überspringen (assume yes)"
   echo "-P                      Vorab-Reservierung des Zielplatzes (fallocate) überspringen"
@@ -152,7 +153,8 @@ function remote_port_generation {
 
 function check_remote_port_availability {
   [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  execute_remote_command "ss -tln | grep -q \":${CURRENT_REMOTE_PORT}\""
+  # Anker [^0-9], damit z.B. Port 1234 nicht auf einen belegten Port 12345 matcht
+  execute_remote_command "ss -tln | grep -qE \":${CURRENT_REMOTE_PORT}[^0-9]\""
   if [[ $? != 0 ]]; then
     return 0
   else
@@ -191,7 +193,7 @@ function remote_restore_commands {
   ATTEMPT=1
   while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     echo "Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)..."
-    if execute_remote_command "ss -tuln | grep -q :${CURRENT_REMOTE_PORT}"; then
+    if execute_remote_command "ss -tuln | grep -qE :${CURRENT_REMOTE_PORT}[^0-9]"; then
       echo "Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop."
       break
     else
@@ -305,7 +307,20 @@ function restore_split_image {
     # teilbare Backups funktionieren. Direkte Pipelines statt eval-Strings:
     # Pfade mit Leerzeichen o.ä. sind so ungefährlich.
     dd_out=(dd of="${OUTPUT_FILE}" bs="${BLOCKSIZEBYTES}" iflag=fullblock,count_bytes count="${COUNT_BYTES}" oflag=seek_bytes seek="${START}" conv=notrunc)
-    if [ $REMOTE -eq 1 ]; then
+    if [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ]; then
+      # Remote netcat restore mit lokaler Dekompression: der Remote-Host sendet
+      # die .gz-Datei unverändert, zcat läuft auf DIESER Maschine. Über das Netz
+      # geht nur der komprimierte Strom, die Remote-Seite benötigt kein gzip.
+      if [ $PART_NUM -eq 0 ]; then
+        echo "Source is remote (compressed, local decompression)"
+      fi
+      if ! remote_restore_commands "dd if=\"${INPUT_FILES}${PART_NUM}.gz\" bs=${BLOCKSIZEBYTES} iflag=fullblock"; then
+        echo "Remote-Restore-Sender für Teil ${PART_NUM} konnte nicht gestartet werden."
+        break
+      fi
+      echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | zcat | ${dd_out[*]}"
+      nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" </dev/null | zcat | "${dd_out[@]}" &
+    elif [ $REMOTE -eq 1 ]; then
       # Remote netcat restore, unkomprimiert: Remote sendet, lokal wird empfangen und geschrieben
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is remote (uncompressed)"
@@ -346,6 +361,12 @@ METADATA_FILE="${INPUT_FILES}metadata.txt"
 
 # Get parameters from metadata file (lokal oder remote)
 if [ $REMOTE -eq 1 ]; then
+  for cmd in ssh nc; do
+    if ! command -v "$cmd" > /dev/null 2>&1; then
+      echo "Fehler: Befehl $cmd ist lokal nicht verfügbar, wird aber für den Remote-Restore benötigt."
+      exit 1
+    fi
+  done
   connect_ssh
   METADATA_SRC=$(mktemp)
   execute_remote_command "cat \"$METADATA_FILE\"" > "$METADATA_SRC" 2>/dev/null
@@ -371,11 +392,15 @@ BLOCKSIZEBYTES=$(grep "^BLOCKSIZEBYTES=" "$METADATA_SRC" | cut -d "=" -f 2)
 COMPRESSION=$(grep "^COMPRESSION=" "$METADATA_SRC" | cut -d "=" -f 2)
 COMPRESSION_LEVEL=$(grep "^COMPRESSION_LEVEL=" "$METADATA_SRC" | cut -d "=" -f 2)
 
-# Remote-Restore unterstützt derzeit nur unkomprimierte Backups (netcat, uncompressed)
-if [ $REMOTE -eq 1 ] && [ ! -z "$COMPRESSION" ]; then
-  echo "Remote-Restore unterstützt derzeit nur unkomprimierte Backups (netcat, uncompressed)."
-  rm -f "$METADATA_SRC"
-  close_ssh_connection
+# Komprimierte Backups werden lokal ausgepackt (auch im Remote-Modus: local
+# decompression). Daher muss zcat auf DIESER Maschine vorhanden sein; die
+# Remote-Seite sendet die .gz-Teile nur unverändert.
+if [ -n "$COMPRESSION" ] && ! command -v zcat > /dev/null 2>&1; then
+  echo "Fehler: Das Backup ist komprimiert, aber zcat (gzip) ist lokal nicht verfügbar."
+  if [ $REMOTE -eq 1 ]; then
+    rm -f "$METADATA_SRC"
+    close_ssh_connection
+  fi
   exit 1
 fi
 

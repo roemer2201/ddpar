@@ -84,12 +84,15 @@ cd testing-docker
 ./run-remote-tests.sh --keep       # Container nach dem Lauf zum Nachsehen laufen lassen
 ```
 
-Geprüft werden (alles über SSH + netcat, Modus `n`, unkomprimiert):
+Geprüft werden (alles über SSH + netcat, Modus `n`):
 
 1. **Remote-Clone** (Datei) `source` → `target`, Vergleich Original ↔ Klon
 2. **Remote-Backup** `source` → `target` und anschließendes **Remote-Restore**
    `target` → `source`, Vergleich Original ↔ Wiederhergestellt
 3. **Remote-Check** (lokale Quelle ↔ Remote-Backup)
+4. **Komprimiert (`-c`, lokale [De]Kompression):** Remote-Backup nach
+   `/backup_gz` (erzeugt `.gz`-Teile auf `target`), Remote-Restore daraus und
+   Remote-Check des komprimierten Backups
 
 Exitcode `0` = alle Szenarien bestanden, `1` = mindestens ein Fehler. Das Skript
 ist ein **manuelles** Werkzeug und nicht Teil der GitHub-Actions-CI (die den
@@ -135,6 +138,14 @@ Alle Kommandos werden **im `source`-Container** ausgeführt
 
 # Remote-Check: lokale Quelle gegen Remote-Backup (nur Hash-Vergleich)
 ./ddpar-check.sh -s /data/source.img -b /backup/source.img -r n -R root@target
+
+# Remote-Backup komprimiert: gzip laeuft auf source, auf target landen .gz-Teile
+mkdir -p /backup_gz 2>/dev/null; ssh root@target "mkdir -p /backup_gz"
+./ddpar.sh -i /data/source.img -o /backup_gz -m backup -c -r n -R root@target
+
+# Restore/Check daraus (zcat laeuft ebenfalls auf source)
+./ddpar-restore.sh -i /backup_gz/source.img -o /restore/source-gz.img -r n -R root@target
+./ddpar-check.sh -s /data/source.img -b /backup_gz/source.img -r n -R root@target
 ```
 
 Ergebnisse auf dem Ziel ansehen:
@@ -143,8 +154,11 @@ Ergebnisse auf dem Ziel ansehen:
 docker compose exec target ls -l /backup
 ```
 
-> **Hinweis:** Remote-Transfer ist aktuell nur **unkomprimiert** implementiert
-> (siehe `README.md` im Repo-Root). `-c`/`-s` greifen auf dem Remote-Pfad nicht.
+> **Hinweis:** Über netcat läuft der Transfer unkomprimiert oder — mit `-c` —
+> mit **lokaler [De]Kompression**: gzip/zcat laufen auf `source`, `target`
+> schreibt bzw. liest nur die `.gz`-Dateien und benötigt kein gzip. Kompression
+> auf der Remote-Seite (`-r c`) und `-s` greifen auf dem Remote-Pfad weiterhin
+> nicht (siehe `README.md` im Repo-Root).
 
 ---
 

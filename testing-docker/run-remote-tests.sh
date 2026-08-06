@@ -173,6 +173,51 @@ else
   echo "$check_out" | tail -15 | sed 's/^/    /'
 fi
 
+# --- Szenario 4: Remote-Backup/-Restore/-Check mit lokaler [De]Kompression ---
+
+info "Szenario 4: Remote-Backup komprimiert (-c, Kompression lokal auf source)"
+src 'ssh -o StrictHostKeyChecking=no root@target "mkdir -p /backup_gz; rm -f /backup_gz/* 2>/dev/null || true"'
+src 'rm -f /restore/source-gz.img 2>/dev/null || true'
+
+if out="$(src "./ddpar.sh -i $SRC_IMG -o /backup_gz -m backup -c -r n -R root@target" 2>&1)"; then
+  vshow "$out"
+  # Komprimiert wird lokal, auf target landen .gz-Teile (kein gzip auf target noetig)
+  if tgt 'test -f /backup_gz/source.img-0.gz && ! test -f /backup_gz/source.img-0.part' \
+     && tgt 'grep -q "^COMPRESSION=1" /backup_gz/source.img-metadata.txt'; then
+    pass "Remote-Backup (-c): .gz-Teile + COMPRESSION=1 in den Metadaten auf target"
+  else
+    fail "Remote-Backup (-c): erwartete .gz-Teile/Metadaten auf target fehlen"
+  fi
+
+  if out2="$(src "./ddpar-restore.sh -i /backup_gz/source.img -o /restore/source-gz.img -r n -R root@target -y" 2>&1)"; then
+    vshow "$out2"
+    sleep 1
+    RES_HASH="$(src 'sha256sum /restore/source-gz.img 2>/dev/null' | awk '{print $1}')"
+    if [ -n "$RES_HASH" ] && [ "$SRC_HASH" = "$RES_HASH" ]; then
+      pass "Remote-Restore (komprimiert, lokale Dekompression) bitgenau (sha256=$RES_HASH)"
+    else
+      fail "Remote-Restore (komprimiert) weicht ab (src=$SRC_HASH restore=${RES_HASH:-<leer>})"
+    fi
+  else
+    vshow "$out2"
+    fail "Remote-Restore-Kommando (komprimiert) schlug fehl"
+    echo "$out2" | tail -15 | sed 's/^/    /'
+  fi
+
+  check_gz_out="$(src "./ddpar-check.sh -s $SRC_IMG -b /backup_gz/source.img -r n -R root@target" 2>&1 || true)"
+  vshow "$check_gz_out"
+  if echo "$check_gz_out" | grep -q "OK" && ! echo "$check_gz_out" | grep -q "MISMATCH"; then
+    pass "Remote-Check des komprimierten Backups bestätigt Übereinstimmung"
+  else
+    fail "Remote-Check des komprimierten Backups meldet keine Übereinstimmung"
+    echo "$check_gz_out" | tail -15 | sed 's/^/    /'
+  fi
+else
+  vshow "$out"
+  fail "Remote-Backup-Kommando (-c) schlug fehl"
+  echo "$out" | tail -15 | sed 's/^/    /'
+fi
+
 # --- Zusammenfassung ---
 
 echo
