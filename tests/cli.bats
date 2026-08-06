@@ -24,6 +24,18 @@ load helpers
   [[ "$output" == *"Fehlende Parameter"* ]]
 }
 
+@test "ddpar.sh -h dokumentiert den Remote-Modus c" {
+  vrun "$REPO_ROOT/ddpar.sh" -h
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[De]Kompression auf der Remote-Maschine"* ]]
+}
+
+@test "ddpar.sh lehnt einen ungültigen Remote-Modus ab" {
+  vrun "$REPO_ROOT/ddpar.sh" -i /etc/hostname -o /tmp -r x -R localhost
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Ungültiger Remote-Modus"* ]]
+}
+
 # --- ddpar-restore.sh ---
 
 @test "ddpar-restore.sh -h zeigt die Hilfe" {

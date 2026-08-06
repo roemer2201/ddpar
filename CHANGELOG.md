@@ -1,5 +1,55 @@
 # Changelog
 
+## [Unreleased] – branch claude/remote-netcat-decompression-fdxwqa (Remote netcat mit Remote-[De]Kompression)
+
+### Hinzugefügt
+- **Remote-Modus `c` (`-r c`) umgesetzt:** `gzip`/`zcat` laufen auf der
+  **Gegenseite** statt lokal. Der Modus wird in allen drei Skripten ausgewertet
+  (bisher nur eine „noch nicht implementiert“-Warnung):
+  - **Backup (`-c -r c`):** über netcat gehen die Rohdaten, der Remote-Host
+    komprimiert sie direkt in die `.gz`-Teile
+    (`nc -N -l PORT | gzip -LEVEL > BASE-N.gz`). Das entlastet die lokale CPU,
+    spart aber keine Bandbreite — dafür bleibt `-r n` die richtige Wahl
+  - **Restore (`-r c`):** der Remote-Host packt selbst aus und sendet Rohdaten
+    (`zcat BASE-N.gz | nc -N -l PORT`), lokal wird nur noch geschrieben
+  - **Check (`-r c`):** `zcat … | sha256sum` läuft auf der Gegenseite, über SSH
+    geht nur der Hash (Modus `n` holt weiterhin die `.gz`-Teile und packt lokal aus)
+- **Kompression im Clone-Modus (`-c -r c`):** lokal wird komprimiert, die
+  Gegenseite dekomprimiert vor dem Schreiben
+  (`nc -N -l PORT | gzip -dc | dd of=…`). Damit ist der Clone-Transfer erstmals
+  komprimiert möglich; ohne `-r c` bleibt es bei der Warnung und einem
+  unkomprimierten Clone
+- **`wait_for_remote_listeners`:** `ddpar.sh` wartet vor dem Schließen der
+  SSH-Verbindung, bis die Remote-Empfänger fertig geschrieben haben
+  (`pgrep -f "nc -N -l [P]ORT"` auf den `sh -c`-Elternprozess; die
+  Zeichenklasse verhindert, dass die per SSH gestartete Shell sich selbst
+  matcht). Ohne das konnte ein direkt anschließender `ddpar-check.sh` eine noch
+  unvollständige Zieldatei lesen — im Modus `c` puffert dort zusätzlich `gzip`.
+  Fehlt `pgrep` auf der Gegenseite, wird wie bisher nicht gewartet
+- **Tests:** `tests/remote.bats` deckt Modus `c` ab (Backup→Restore inkl. nicht
+  glatt teilbarer Größe, Clone mit `-c`, Check positiv/negativ, Warnung bei `-c`
+  ohne `-r c`, Restore eines `-r c`-Backups mit `-r n`); `tests/cli.bats` prüft
+  Hilfetext und Ablehnung ungültiger Modi; `testing-docker/run-remote-tests.sh`
+  bekommt die Szenarien 5 (Backup/Restore/Check mit `-r c`) und 6 (Clone `-c -r c`)
+
+### Geändert
+- **Verfügbarkeits-Prüfungen folgen dem Modus:** `gzip` wird auf dem Remote-Host
+  nur bei `-r c` verlangt, lokal beim Remote-Backup mit `-r c` dagegen nicht
+  mehr; `ddpar-restore.sh`/`ddpar-check.sh` prüfen `zcat` auf der jeweils
+  auspackenden Seite
+- **`-r` ohne Modusangabe** funktioniert jetzt wie in der Hilfe dokumentiert
+  (`-r [lnc]`) und bedeutet Modus `n`: bisher verschluckte `getopts` die
+  folgende Option als Argument (`-r -R host` → Modus „-R“, Host nie gesetzt)
+  bzw. ignorierte `-r` am Zeilenende samt `REMOTE=1` stillschweigend. Ein
+  ungültiger Modus führt zu einer Fehlermeldung und Exit 1, `-r l` warnt
+  weiterhin und fällt auf `n` zurück
+- **Fehlende Optionsargumente** (z.B. `-j` ohne Zahl) brechen mit einer
+  Meldung ab, statt still ignoriert zu werden
+- Die `.gz`-Teile sind in beiden Modi identisch: ein mit `-r c` erzeugtes Backup
+  lässt sich mit `-r n` wiederherstellen und prüfen — und umgekehrt
+- Dokumentation (README-Matrix, ARCHITECTURE, TESTING, CLAUDE.md, Test-READMEs)
+  auf die beiden Kompressionsvarianten umgestellt
+
 ## [Unreleased] – branch claude/remote-netcat-local-compression-z8sk5b (Remote netcat mit lokaler [De]Kompression)
 
 ### Hinzugefügt

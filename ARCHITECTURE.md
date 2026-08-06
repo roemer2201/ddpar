@@ -80,6 +80,22 @@ dd if=INPUT ... | nc REMOTE_HOST PORT  &
 nc -N -l PORT | dd of=BASE-N.part bs=BLOCKSIZE  &
 ```
 
+### Remote Clone (Netcat) mit Remote-Dekompression (`-c` + `-r c`)
+
+Ein Clone muss auf der Gegenseite als Rohdaten ankommen. Komprimiert übertragen
+lässt er sich daher nur, wenn dort wieder dekomprimiert wird — deshalb ist `-c`
+im Clone-Modus ausschließlich mit `-r c` möglich.
+
+**Lokal:**
+```
+dd if=INPUT ... | gzip -LEVEL | nc REMOTE_HOST PORT  &
+```
+
+**Remote:**
+```
+nc -N -l PORT | gzip -dc | dd of=OUTPUT ... seek=... conv=notrunc  &
+```
+
 ### Remote Backup (Netcat) mit lokaler Kompression (`-c`)
 
 `gzip` läuft auf der **lokalen** Maschine; über das Netz geht nur der
@@ -94,6 +110,22 @@ dd if=INPUT ... | gzip -LEVEL | nc REMOTE_HOST PORT  &
 **Remote:**
 ```
 nc -N -l PORT | dd of=BASE-N.gz bs=BLOCKSIZE  &
+```
+
+### Remote Backup (Netcat) mit Remote-Kompression (`-c` + `-r c`)
+
+`gzip` läuft auf dem **Remote-Host** und schreibt dort direkt die `.gz`-Datei.
+Über das Netz gehen die Rohdaten: das entlastet die lokale CPU, spart aber
+keine Bandbreite (dafür `-r n`).
+
+**Lokal:**
+```
+dd if=INPUT ... | nc REMOTE_HOST PORT  &
+```
+
+**Remote:**
+```
+nc -N -l PORT | gzip -LEVEL > BASE-N.gz  &
 ```
 
 ### Remote Restore (Netcat) mit lokaler Dekompression
@@ -113,20 +145,49 @@ nc REMOTE_HOST PORT </dev/null | zcat | dd of=OUTPUT ... seek=...  &
 
 Ob der komprimierte Pfad genutzt wird, entscheidet `COMPRESSION` aus der
 Metadatendatei — Restore und Check erkennen komprimierte Backups also
-automatisch.
+automatisch. **Wo** aus- bzw. eingepackt wird, bestimmt dagegen `-r`.
+
+### Remote Restore (Netcat) mit Remote-Dekompression (`-r c`)
+
+**Remote (Sender):**
+```
+zcat BASE-N.gz | nc -N -l PORT
+```
+
+**Lokal (Empfänger):**
+```
+nc REMOTE_HOST PORT </dev/null | dd of=OUTPUT ... seek=...  &
+```
+
+Die `.gz`-Teile sind in beiden Modi identisch: ein mit `-r c` erzeugtes Backup
+lässt sich mit `-r n` wiederherstellen und umgekehrt.
 
 ### Remote Check eines komprimierten Backups
 
-Der Check überträgt normalerweise keine Nutzdaten: bei unkomprimierten Backups
+Der Check überträgt keine Nutzdaten über netcat: bei unkomprimierten Backups
 läuft `sha256sum` auf dem Remote-Host, nur der Hash geht über SSH. Für
-komprimierte Backups wird die `.gz`-Datei über SSH geholt und **lokal**
-ausgepackt, damit auch hier kein `gzip` auf der Gegenseite nötig ist:
+komprimierte Backups hängt es vom Modus ab:
 
 ```
-ssh HOST "cat BASE-N.gz" | zcat | sha256sum      (lokal)
+ssh HOST "cat BASE-N.gz" | zcat | sha256sum        (-r n: lokal auspacken)
+ssh HOST "zcat BASE-N.gz | sha256sum"              (-r c: remote auspacken)
 ```
 
-Verglichen werden in beiden Fällen die Hashes der **Rohdaten** des Segments.
+Modus `n` braucht kein `gzip` auf der Gegenseite, überträgt dafür die
+komprimierten Daten; Modus `c` überträgt nur den Hash. Verglichen werden in
+allen Fällen die Hashes der **Rohdaten** des Segments.
+
+### Abschluss der Remote-Empfänger
+
+Beim Remote-Clone und Remote-Backup schreibt die Gegenseite: wenn der lokale
+Sender fertig ist, kann dort noch gepuffertes Material unterwegs sein — im Modus
+`c` muss zusätzlich `gzip` den Rest der Pipe verarbeiten. `wait_for_remote_listeners()`
+wartet daher vor dem Schließen der SSH-Verbindung, bis der `sh -c`-Elternprozess
+jedes Listeners beendet ist (`pgrep -f "nc -N -l [P]ORT"`; die erste Ziffer steht
+in einer Zeichenklasse, damit die per SSH gestartete Shell sich nicht selbst
+matcht). Ohne dieses Warten könnte ein direkt anschließender `ddpar-check.sh`
+eine noch unvollständige Datei lesen. Fehlt `pgrep` auf der Gegenseite, wird
+nicht gewartet.
 
 ---
 
@@ -178,13 +239,22 @@ ein neuer Port generiert.
 | Flag | Bedeutung | Implementierungsstatus |
 |---|---|---|
 | `n` | Netcat ohne Datenverschlüsselung | ✅ |
-| `n` + `-c` | Netcat, Kompression/Dekompression auf der lokalen Seite | ✅ (Backup/Restore/Check) |
-| `l` | Vollständig über SSH (verschlüsselt) | ⚙️ teilweise |
-| `c` | Kompression auf der Remote-Seite | ⚙️ teilweise |
+| `n` + `-c` | Netcat, [De]Kompression auf der lokalen Seite | ✅ (Backup/Restore/Check) |
+| `c` + `-c` | Netcat, [De]Kompression auf der Remote-Seite | ✅ (Clone/Backup/Restore/Check) |
+| `l` | Vollständig über SSH (verschlüsselt) | 🛑 nicht implementiert (fällt mit Warnung auf `n` zurück) |
 
-`-c` im **Clone**-Modus ist noch nicht umgesetzt: der Clone müsste auf der
-Gegenseite wieder dekomprimiert werden (remote decompression). Das Skript gibt
-dort eine Warnung aus und klont unkomprimiert.
+Wer was komprimiert und was über das Netz geht:
+
+| Vorgang | `-r n -c` | `-r c -c` |
+|---|---|---|
+| Clone | 🛑 nicht möglich (Warnung, unkomprimierter Clone) | lokal `gzip`, remote `gzip -dc` → **komprimierter** Transfer |
+| Backup | lokal `gzip` → **komprimierter** Transfer | remote `gzip` → Rohdaten über das Netz, lokale CPU entlastet |
+| Restore | remote sendet `.gz`, lokal `zcat` → **komprimierter** Transfer | remote `zcat` → Rohdaten über das Netz |
+| Check | `.gz` über SSH holen, lokal auspacken | remote auspacken und hashen → nur der Hash über SSH |
+
+Modus `n` braucht **kein** `gzip` auf der Gegenseite, Modus `c` schon
+(`check_remote_commands_availability` prüft das). `-r c` ohne `-c` hat nichts zu
+[de]komprimieren und verhält sich wie `n`; das Skript weist darauf hin.
 
 ---
 
@@ -214,5 +284,7 @@ dort eine Warnung aus und klont unkomprimiert.
 | `run_clone_parts` | Gemeinsame Teil-Schleife für Clone (lokal und remote) |
 | `backup_mode` | Backup in Teil-Dateien inkl. Metadaten (lokal und remote, optional komprimiert) |
 | `setup_remote_listener` | Startet je Teil einen `nc`-Empfänger auf dem Remote-Host |
+| `remote_compression_active` | Wahr, wenn [De]Kompression auf der Remote-Seite läuft (`-r c` + `-c`) |
+| `wait_for_remote_listeners` | Wartet, bis die Remote-Empfänger (inkl. `gzip`) fertig geschrieben haben |
 | `append_metadata` | Schreibt eine Zeile in die Metadatendatei (lokal oder remote) |
 | `register_job` / `wait_for_jobs` | Sammeln der Exit-Codes aller parallelen Teil-Jobs |

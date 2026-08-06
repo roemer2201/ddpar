@@ -80,3 +80,11 @@ require_remote_support() {
       "$REMOTE_TEST_HOST" true 2>/dev/null \
       || skip "keine passwortlose SSH-Verbindung zu $REMOTE_TEST_HOST"
 }
+
+# Überspringt den Test, wenn gzip/zcat auf dem Testhost fehlen. Nötig für die
+# Szenarien mit Remote-[De]Kompression (-r c), bei denen gzip dort läuft.
+require_remote_gzip() {
+  ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+      "$REMOTE_TEST_HOST" "command -v gzip zcat > /dev/null" 2>/dev/null \
+      || skip "gzip/zcat auf $REMOTE_TEST_HOST nicht verfügbar"
+}

@@ -16,6 +16,9 @@ INTERNAL_EXITCODE=0
 NUM_JOBS=4
 BLOCKSIZEBYTES=1048576
 REMOTE=0
+# Remote-Modus: "n" = Dekompression komprimierter Backup-Teile auf DIESER
+# Maschine, "c" = Dekompression auf der Remote-Maschine
+REMOTE_MODE="n"
 REMOTE_HOST=""
 SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
 DEBUG=0
@@ -31,9 +34,13 @@ function show_help {
   echo "-d PATH         Destination to compare against"
   echo "-j NUM          Anzahl der Jobs für den Clone-Check (Default: 4, nur ohne -b)"
   echo "-B NUM          Blockgröße in Bytes für den Clone-Check (Default: 1048576, nur ohne -b)"
-  echo "-r [n]          Remote-Check über SSH. Die gesicherte/geklonte Seite (-b bzw. bei"
+  echo "-r [nc]         Remote-Check über SSH. Die gesicherte/geklonte Seite (-b bzw. bei"
   echo "                Clone-Check -d) liegt auf dem Remote-Host. Komprimierte Backups"
-  echo "                werden unterstützt (Dekompression lokal)."
+  echo "                werden unterstützt:"
+  echo "                  n (Default): die .gz-Teile werden über SSH geholt und lokal"
+  echo "                    ausgepackt (local decompression, kein gzip auf der Gegenseite)"
+  echo "                  c: die Gegenseite packt selbst aus und hasht, es geht nur der"
+  echo "                    SHA256-Hash über SSH; dort wird gzip benötigt"
   echo "-R user@host    Angabe des Remote-Host"
   echo "-h, --help      Zeigt diese Hilfemeldung an"
 }
@@ -200,9 +207,15 @@ function remote_part_hash {
   #   der Hash über die Leitung
   # - komprimiert: die .gz-Datei wird über SSH geholt und LOKAL ausgepackt
   #   (local decompression), der Remote-Host benötigt dafür kein gzip
+  # - komprimiert mit -r c: zcat und sha256sum laufen auf dem Remote-Host
+  #   (remote decompression), auch hier geht nur der Hash über die Leitung
   local idx=$1
   if [ -n "$COMPRESSION" ]; then
-    execute_remote_command "cat '${BASE_FILES}${idx}.gz'" | zcat | sha256sum | cut -d' ' -f1
+    if [ "$REMOTE_MODE" = "c" ]; then
+      execute_remote_command "zcat '${BASE_FILES}${idx}.gz' | sha256sum" | cut -d' ' -f1
+    else
+      execute_remote_command "cat '${BASE_FILES}${idx}.gz'" | zcat | sha256sum | cut -d' ' -f1
+    fi
   else
     execute_remote_command "sha256sum '${BASE_FILES}${idx}.part'" | cut -d' ' -f1
   fi
@@ -307,8 +320,24 @@ while getopts ":b:s:d:j:B:r::R:h" opt; do
     B) echo "Set BLOCKSIZEBYTES=$OPTARG"; BLOCKSIZEBYTES="$OPTARG" ;;
     r)
       REMOTE=1
-      # Der Remote-Check überträgt nur SHA256-Hashes über SSH; die Modi l/c
-      # aus ddpar.sh sind hier ohne Bedeutung.
+      # Der Remote-Check überträgt keine Nutzdaten über netcat. Relevant ist der
+      # Modus nur für komprimierte Backups: "n" holt die .gz-Teile über SSH und
+      # packt sie lokal aus, "c" lässt die Gegenseite auspacken und hashen.
+      case "${OPTARG}" in
+        n|"") REMOTE_MODE="n";;
+        c)    REMOTE_MODE="c";;
+        l)    REMOTE_MODE="n";;
+        -*)
+          # "-r" ohne Modus: getopts hat bereits die nächste Option als Argument
+          # gelesen. OPTIND zurücksetzen, damit sie regulär verarbeitet wird.
+          REMOTE_MODE="n"
+          OPTIND=$((OPTIND - 1))
+          ;;
+        *)
+          echo "Ungültiger Remote-Modus '${OPTARG}'. Gültige Angaben: l|n|c"
+          exit 1
+          ;;
+      esac
       ;;
     R)
       REMOTE=1
@@ -318,6 +347,16 @@ while getopts ":b:s:d:j:B:r::R:h" opt; do
       ;;
     h|-help) show_help; exit 0;;
     \?) echo "Ungültige Option: -$OPTARG";;
+    :)
+      # -r darf ohne Argument stehen (Default-Modus n), alle anderen Optionen nicht
+      if [ "$OPTARG" = "r" ]; then
+        REMOTE=1
+        REMOTE_MODE="n"
+      else
+        echo "Option -$OPTARG erfordert ein Argument."
+        exit 1
+      fi
+      ;;
   esac
 done
 
@@ -395,12 +434,21 @@ if [ ! -z "${BASE_PATH}" ]; then
   [ -z "$INPUT_SIZE" ] && INPUT_SIZE=$((SPLIT_SIZE * NUM_JOBS))
   [ $REMOTE -eq 1 ] && rm -f "$META_SRC"
 
-  # Komprimierte Remote-Backups werden lokal ausgepackt (local decompression),
-  # dafür muss zcat auf DIESER Maschine vorhanden sein.
-  if [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ] && ! command -v zcat > /dev/null 2>&1; then
-    echo "Fehler: Das Backup ist komprimiert, aber zcat (gzip) ist lokal nicht verfügbar."
-    close_ssh_connection
-    exit 1
+  # Komprimierte Remote-Backups werden im Modus "n" lokal ausgepackt (local
+  # decompression), im Modus "c" auf der Gegenseite. zcat muss also auf der
+  # jeweils auspackenden Seite vorhanden sein.
+  if [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ]; then
+    if [ "$REMOTE_MODE" = "c" ]; then
+      if ! execute_remote_command "command -v zcat > /dev/null 2>&1"; then
+        echo "Fehler: Das Backup ist komprimiert und -r c verlangt zcat (gzip) auf ${REMOTE_HOST}, dort ist es nicht verfügbar."
+        close_ssh_connection
+        exit 1
+      fi
+    elif ! command -v zcat > /dev/null 2>&1; then
+      echo "Fehler: Das Backup ist komprimiert, aber zcat (gzip) ist lokal nicht verfügbar."
+      close_ssh_connection
+      exit 1
+    fi
   fi
 
   # Debug Info:

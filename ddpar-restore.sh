@@ -10,6 +10,9 @@ INPUT_FILE_BASENAME=""
 OUTPUT_FILE=""
 INTERNAL_EXITCODE=0
 REMOTE=0
+# Remote-Modus: "n" = netcat, Dekompression auf DIESER Maschine,
+# "c" = netcat, Dekompression auf der Remote-Maschine
+REMOTE_MODE="n"
 REMOTE_HOST=""
 SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
 DEBUG=0
@@ -25,8 +28,12 @@ function show_help {
   echo "Optionen:"
   echo "-i, --input PATH        Der Basisname des geteilten Abbildes (bei Remote: Pfad auf dem Remote-Host)"
   echo "-o, --output PATH       Vollständiger Pfad des (lokalen) Zielgeräts"
-  echo "-r [n]                  Remote-Restore über SSH+Netcat. Komprimierte Backups werden"
-  echo "                        unterstützt: die Dekompression läuft lokal (local decompression)"
+  echo "-r [nc]                 Remote-Restore über SSH+Netcat. Komprimierte Backups werden"
+  echo "                        unterstützt. Remote-Optionen:"
+  echo "                          n (Default): der Remote-Host sendet die .gz-Teile unverändert,"
+  echo "                            zcat läuft lokal (local decompression, kein gzip auf der Gegenseite)"
+  echo "                          c: der Remote-Host packt die .gz-Teile selbst aus (remote decompression),"
+  echo "                            über netcat gehen die Rohdaten; dort wird gzip benötigt"
   echo "-R user@host            Angabe des Remote-Host, auf dem das Backup liegt"
   echo "-y                      Sicherheitsabfrage überspringen (assume yes)"
   echo "-P                      Vorab-Reservierung des Zielplatzes (fallocate) überspringen"
@@ -44,10 +51,26 @@ while getopts ":i:o:r::R:yPh" opt; do
     P) SKIP_PREALLOC=1;;
     r)
       REMOTE=1
-      # Bisher ist nur Modus "n" (netcat, Datenkanal unverschlüsselt) implementiert.
-      if [[ ${OPTARG} =~ [lc] ]]; then
-        echo "[WARN] Remote-Modus '${OPTARG}' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat."
-      fi
+      # "n" = Dekompression lokal, "c" = Dekompression auf der Remote-Maschine.
+      # "l" (Datenkanal verschlüsselt) ist weiterhin nicht implementiert.
+      case "${OPTARG}" in
+        n|"") REMOTE_MODE="n";;
+        c)    REMOTE_MODE="c";;
+        l)
+          REMOTE_MODE="n"
+          echo "[WARN] Remote-Modus 'l' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat."
+          ;;
+        -*)
+          # "-r" ohne Modus: getopts hat bereits die nächste Option als Argument
+          # gelesen. OPTIND zurücksetzen, damit sie regulär verarbeitet wird.
+          REMOTE_MODE="n"
+          OPTIND=$((OPTIND - 1))
+          ;;
+        *)
+          echo "Ungültiger Remote-Modus '${OPTARG}'. Gültige Angaben: l|n|c"
+          exit 1
+          ;;
+      esac
       ;;
     R)
       REMOTE=1
@@ -57,6 +80,16 @@ while getopts ":i:o:r::R:yPh" opt; do
       ;;
     h|-help) show_help; exit 1;;
     \?) echo "Ungültige Option: -$OPTARG";;
+    :)
+      # -r darf ohne Argument stehen (Default-Modus n), alle anderen Optionen nicht
+      if [ "$OPTARG" = "r" ]; then
+        REMOTE=1
+        REMOTE_MODE="n"
+      else
+        echo "Option -$OPTARG erfordert ein Argument."
+        exit 1
+      fi
+      ;;
   esac
 done
 
@@ -307,7 +340,21 @@ function restore_split_image {
     # teilbare Backups funktionieren. Direkte Pipelines statt eval-Strings:
     # Pfade mit Leerzeichen o.ä. sind so ungefährlich.
     dd_out=(dd of="${OUTPUT_FILE}" bs="${BLOCKSIZEBYTES}" iflag=fullblock,count_bytes count="${COUNT_BYTES}" oflag=seek_bytes seek="${START}" conv=notrunc)
-    if [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ]; then
+    if [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ] && [ "$REMOTE_MODE" = "c" ]; then
+      # Remote netcat restore mit Dekompression auf der Gegenseite (-r c): der
+      # Remote-Host packt die .gz-Teile selbst aus und sendet die Rohdaten, hier
+      # werden sie nur noch geschrieben. Das entlastet die lokale CPU, spart aber
+      # keine Bandbreite (dafür siehe -r n).
+      if [ $PART_NUM -eq 0 ]; then
+        echo "Source is remote (compressed, remote decompression)"
+      fi
+      if ! remote_restore_commands "zcat \"${INPUT_FILES}${PART_NUM}.gz\""; then
+        echo "Remote-Restore-Sender für Teil ${PART_NUM} konnte nicht gestartet werden."
+        break
+      fi
+      echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | ${dd_out[*]}"
+      nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" </dev/null | "${dd_out[@]}" &
+    elif [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ]; then
       # Remote netcat restore mit lokaler Dekompression: der Remote-Host sendet
       # die .gz-Datei unverändert, zcat läuft auf DIESER Maschine. Über das Netz
       # geht nur der komprimierte Strom, die Remote-Seite benötigt kein gzip.
@@ -392,16 +439,30 @@ BLOCKSIZEBYTES=$(grep "^BLOCKSIZEBYTES=" "$METADATA_SRC" | cut -d "=" -f 2)
 COMPRESSION=$(grep "^COMPRESSION=" "$METADATA_SRC" | cut -d "=" -f 2)
 COMPRESSION_LEVEL=$(grep "^COMPRESSION_LEVEL=" "$METADATA_SRC" | cut -d "=" -f 2)
 
-# Komprimierte Backups werden lokal ausgepackt (auch im Remote-Modus: local
-# decompression). Daher muss zcat auf DIESER Maschine vorhanden sein; die
-# Remote-Seite sendet die .gz-Teile nur unverändert.
-if [ -n "$COMPRESSION" ] && ! command -v zcat > /dev/null 2>&1; then
-  echo "Fehler: Das Backup ist komprimiert, aber zcat (gzip) ist lokal nicht verfügbar."
-  if [ $REMOTE -eq 1 ]; then
-    rm -f "$METADATA_SRC"
-    close_ssh_connection
+if [ $REMOTE -eq 1 ] && [ "$REMOTE_MODE" = "c" ] && [ -z "$COMPRESSION" ]; then
+  echo "[WARN] Remote-Modus 'c' bei unkomprimiertem Backup: es wird nichts dekomprimiert, die Übertragung entspricht Modus 'n'."
+fi
+
+# Komprimierte Backups werden im Remote-Modus "n" (und lokal) auf DIESER
+# Maschine ausgepackt (local decompression); im Remote-Modus "c" übernimmt das
+# der Remote-Host (remote decompression). zcat muss also auf der jeweils
+# auspackenden Seite vorhanden sein.
+if [ -n "$COMPRESSION" ]; then
+  if [ $REMOTE -eq 1 ] && [ "$REMOTE_MODE" = "c" ]; then
+    if ! execute_remote_command "command -v zcat > /dev/null 2>&1"; then
+      echo "Fehler: Das Backup ist komprimiert und -r c verlangt zcat (gzip) auf ${REMOTE_HOST}, dort ist es nicht verfügbar."
+      rm -f "$METADATA_SRC"
+      close_ssh_connection
+      exit 1
+    fi
+  elif ! command -v zcat > /dev/null 2>&1; then
+    echo "Fehler: Das Backup ist komprimiert, aber zcat (gzip) ist lokal nicht verfügbar."
+    if [ $REMOTE -eq 1 ]; then
+      rm -f "$METADATA_SRC"
+      close_ssh_connection
+    fi
+    exit 1
   fi
-  exit 1
 fi
 
 # Leserechte auf die Teil-Dateien vorab prüfen, damit der Restore nicht erst

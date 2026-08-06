@@ -84,15 +84,21 @@ cd testing-docker
 ./run-remote-tests.sh --keep       # Container nach dem Lauf zum Nachsehen laufen lassen
 ```
 
-Geprüft werden (alles über SSH + netcat, Modus `n`):
+Geprüft werden (alles über SSH + netcat):
 
 1. **Remote-Clone** (Datei) `source` → `target`, Vergleich Original ↔ Klon
 2. **Remote-Backup** `source` → `target` und anschließendes **Remote-Restore**
    `target` → `source`, Vergleich Original ↔ Wiederhergestellt
 3. **Remote-Check** (lokale Quelle ↔ Remote-Backup)
-4. **Komprimiert (`-c`, lokale [De]Kompression):** Remote-Backup nach
+4. **Komprimiert, Modus `n` (`-c`, lokale [De]Kompression):** Remote-Backup nach
    `/backup_gz` (erzeugt `.gz`-Teile auf `target`), Remote-Restore daraus und
    Remote-Check des komprimierten Backups
+5. **Komprimiert, Modus `c` (`-c -r c`, [De]Kompression auf `target`):**
+   Remote-Backup nach `/backup_rc`, Remote-Restore und Remote-Check jeweils mit
+   `-r c` sowie ein Gegen-Restore mit `-r n` (die `.gz`-Teile sind identisch,
+   egal wo komprimiert wurde)
+6. **Remote-Clone komprimiert (`-c -r c`):** `source` komprimiert, `target`
+   dekomprimiert vor dem Schreiben, Vergleich Original ↔ Klon
 
 Exitcode `0` = alle Szenarien bestanden, `1` = mindestens ein Fehler. Das Skript
 ist ein **manuelles** Werkzeug und nicht Teil der GitHub-Actions-CI (die den
@@ -146,6 +152,16 @@ mkdir -p /backup_gz 2>/dev/null; ssh root@target "mkdir -p /backup_gz"
 # Restore/Check daraus (zcat laeuft ebenfalls auf source)
 ./ddpar-restore.sh -i /backup_gz/source.img -o /restore/source-gz.img -r n -R root@target
 ./ddpar-check.sh -s /data/source.img -b /backup_gz/source.img -r n -R root@target
+
+# Modus c: gzip/zcat laufen auf target (dort wird gzip benoetigt)
+ssh root@target "mkdir -p /backup_rc"
+./ddpar.sh -i /data/source.img -o /backup_rc -m backup -c -r c -R root@target
+./ddpar-restore.sh -i /backup_rc/source.img -o /restore/source-rc.img -r c -R root@target
+./ddpar-check.sh -s /data/source.img -b /backup_rc/source.img -r c -R root@target
+
+# Clone komprimiert: nur mit -r c moeglich (target dekomprimiert vor dem Schreiben)
+ssh root@target "mkdir -p /clone_dest_gz"
+./ddpar.sh -i /data/source.img -o /clone_dest_gz -m clone -c -r c -R root@target
 ```
 
 Ergebnisse auf dem Ziel ansehen:
@@ -154,11 +170,12 @@ Ergebnisse auf dem Ziel ansehen:
 docker compose exec target ls -l /backup
 ```
 
-> **Hinweis:** Über netcat läuft der Transfer unkomprimiert oder — mit `-c` —
-> mit **lokaler [De]Kompression**: gzip/zcat laufen auf `source`, `target`
-> schreibt bzw. liest nur die `.gz`-Dateien und benötigt kein gzip. Kompression
-> auf der Remote-Seite (`-r c`) und `-s` greifen auf dem Remote-Pfad weiterhin
-> nicht (siehe `README.md` im Repo-Root).
+> **Hinweis:** Über netcat läuft der Transfer unkomprimiert oder mit `-c` in
+> zwei Varianten: **lokale [De]Kompression** (`-r n`) — gzip/zcat laufen auf
+> `source`, `target` schreibt bzw. liest nur die `.gz`-Dateien und benötigt kein
+> gzip — oder **Remote-[De]Kompression** (`-r c`) — gzip/zcat laufen auf
+> `target`. `-s` greift auf dem Remote-Pfad weiterhin nicht (siehe `README.md`
+> im Repo-Root).
 
 ---
 

@@ -218,6 +218,90 @@ else
   echo "$out" | tail -15 | sed 's/^/    /'
 fi
 
+# --- Szenario 5: Remote-[De]Kompression (-r c) ---
+
+info "Szenario 5: Remote-Backup komprimiert (-r c, Kompression auf target)"
+src 'ssh -o StrictHostKeyChecking=no root@target "mkdir -p /backup_rc; rm -f /backup_rc/* 2>/dev/null || true"'
+src 'rm -f /restore/source-rc.img 2>/dev/null || true'
+
+if out="$(src "./ddpar.sh -i $SRC_IMG -o /backup_rc -m backup -c -r c -R root@target" 2>&1)"; then
+  vshow "$out"
+  # Ueber netcat gehen die Rohdaten, gzip laeuft auf target und schreibt die .gz-Teile
+  if tgt 'test -f /backup_rc/source.img-0.gz && ! test -f /backup_rc/source.img-0.part' \
+     && tgt 'grep -q "^COMPRESSION=1" /backup_rc/source.img-metadata.txt'; then
+    pass "Remote-Backup (-r c): .gz-Teile + COMPRESSION=1 in den Metadaten auf target"
+  else
+    fail "Remote-Backup (-r c): erwartete .gz-Teile/Metadaten auf target fehlen"
+  fi
+
+  if out2="$(src "./ddpar-restore.sh -i /backup_rc/source.img -o /restore/source-rc.img -r c -R root@target -y" 2>&1)"; then
+    vshow "$out2"
+    sleep 1
+    RES_HASH="$(src 'sha256sum /restore/source-rc.img 2>/dev/null' | awk '{print $1}')"
+    if [ -n "$RES_HASH" ] && [ "$SRC_HASH" = "$RES_HASH" ]; then
+      pass "Remote-Restore (remote decompression) bitgenau (sha256=$RES_HASH)"
+    else
+      fail "Remote-Restore (-r c) weicht ab (src=$SRC_HASH restore=${RES_HASH:-<leer>})"
+    fi
+  else
+    vshow "$out2"
+    fail "Remote-Restore-Kommando (-r c) schlug fehl"
+    echo "$out2" | tail -15 | sed 's/^/    /'
+  fi
+
+  check_rc_out="$(src "./ddpar-check.sh -s $SRC_IMG -b /backup_rc/source.img -r c -R root@target" 2>&1 || true)"
+  vshow "$check_rc_out"
+  if echo "$check_rc_out" | grep -q "OK" && ! echo "$check_rc_out" | grep -q "MISMATCH"; then
+    pass "Remote-Check (-r c, Hashing auf target) bestätigt Übereinstimmung"
+  else
+    fail "Remote-Check (-r c) meldet keine Übereinstimmung"
+    echo "$check_rc_out" | tail -15 | sed 's/^/    /'
+  fi
+
+  # Die .gz-Teile sind unabhaengig davon, wo komprimiert wurde: Restore mit
+  # lokaler Dekompression (-r n) muss dieselben Daten liefern.
+  src 'rm -f /restore/source-rc-n.img 2>/dev/null || true'
+  if out3="$(src "./ddpar-restore.sh -i /backup_rc/source.img -o /restore/source-rc-n.img -r n -R root@target -y" 2>&1)"; then
+    vshow "$out3"
+    sleep 1
+    RES_HASH="$(src 'sha256sum /restore/source-rc-n.img 2>/dev/null' | awk '{print $1}')"
+    if [ -n "$RES_HASH" ] && [ "$SRC_HASH" = "$RES_HASH" ]; then
+      pass "Mit -r c erzeugtes Backup ist auch mit -r n wiederherstellbar"
+    else
+      fail "Restore (-r n) eines -r c-Backups weicht ab (src=$SRC_HASH restore=${RES_HASH:-<leer>})"
+    fi
+  else
+    vshow "$out3"
+    fail "Restore-Kommando (-r n) eines -r c-Backups schlug fehl"
+    echo "$out3" | tail -15 | sed 's/^/    /'
+  fi
+else
+  vshow "$out"
+  fail "Remote-Backup-Kommando (-r c) schlug fehl"
+  echo "$out" | tail -15 | sed 's/^/    /'
+fi
+
+# --- Szenario 6: Remote-Clone komprimiert (-r c -c) ---
+
+info "Szenario 6: Remote-Clone komprimiert (lokal gzip, target dekomprimiert)"
+src 'ssh -o StrictHostKeyChecking=no root@target "mkdir -p /clone_dest_gz; rm -f /clone_dest_gz/* 2>/dev/null || true"'
+
+if out="$(src "./ddpar.sh -i $SRC_IMG -o /clone_dest_gz -m clone -c -r c -R root@target" 2>&1)"; then
+  vshow "$out"
+  tgt 'sync' || true
+  sleep 1
+  DST_HASH="$(tgt 'sha256sum /clone_dest_gz/source.img 2>/dev/null' | awk '{print $1}')"
+  if [ -n "$DST_HASH" ] && [ "$SRC_HASH" = "$DST_HASH" ]; then
+    pass "Remote-Clone (-r c -c) bitgenau (sha256=$DST_HASH)"
+  else
+    fail "Remote-Clone (-r c -c) weicht ab (src=$SRC_HASH dst=${DST_HASH:-<leer>})"
+  fi
+else
+  vshow "$out"
+  fail "Remote-Clone-Kommando (-r c -c) schlug fehl"
+  echo "$out" | tail -15 | sed 's/^/    /'
+fi
+
 # --- Zusammenfassung ---
 
 echo
