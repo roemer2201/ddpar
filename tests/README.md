@@ -38,15 +38,21 @@ sodass `make test` auch ohne root/SSH grün bleibt.
 - `blockdev.bats` – **Blockgeräte** über Loop-Devices (`losetup`, benötigt root):
   lokaler Clone Gerät→Gerät, Backup→Restore Gerät und `check` gegen die Quelle.
   Ohne root werden die Tests übersprungen.
-- `remote.bats` – **Remote** über SSH+netcat (Modus `n`), Testhost
-  standardmäßig `localhost` (über `DDPAR_REMOTE_TEST_HOST` überschreibbar):
+- `remote.bats` – **Remote** über SSH+netcat, Testhost standardmäßig
+  `localhost` (über `DDPAR_REMOTE_TEST_HOST` überschreibbar):
   Remote-Clone (Datei), Remote-Backup→Remote-Restore (Datei) unkomprimiert
-  sowie mit lokaler [De]Kompression (`-c`, inkl. nicht glatt teilbarer Größe)
-  und Remote-Check eines komprimierten Backups (positiv und negativ). Ohne
-  passwortlose SSH-Verbindung werden die Tests übersprungen.
+  sowie mit lokaler [De]Kompression (Modus `n` + `-c`, inkl. nicht glatt
+  teilbarer Größe) und Remote-Check eines komprimierten Backups (positiv und
+  negativ). Für Modus `c` (**[De]Kompression auf der Gegenseite**) zusätzlich:
+  Backup→Restore, Clone mit `-c`, Check (positiv/negativ), die Warnung bei
+  `-c` ohne `-r c` im Clone-Modus und die Interoperabilität der Modi (mit
+  `-r c` erzeugtes Backup, Restore mit `-r n`). Ohne passwortlose
+  SSH-Verbindung werden die Tests übersprungen, ohne `gzip` auf dem Testhost
+  nur die `-r c`-Tests.
 - `helpers.bash` – gemeinsames `setup`/`teardown` (isoliertes Temp-Verzeichnis,
   automatisches Lösen von Loop-Devices/SSH-Socket) sowie `make_testfile`,
-  `loop_setup`, `require_block_support`, `require_remote_support`.
+  `loop_setup`, `require_block_support`, `require_remote_support`,
+  `require_remote_gzip`.
 
 ### CI
 
@@ -57,9 +63,10 @@ root aus (siehe `.github/workflows/ci.yml`).
 
 ## Nicht hier abgedeckt
 
-- Remote-Pfade mit **echtem Zwei-Host-Setup** sowie die Modi `l`/`c` – dafür
-  das Docker-Harness unter [`../testing-docker/`](../testing-docker/) (inkl.
-  `run-remote-tests.sh` für einen automatisierten Zwei-Container-Durchlauf) und
-  die Szenarien in [`../TESTING.md`](../TESTING.md).
+- Remote-Pfade mit **echtem Zwei-Host-Setup**, Remote-Blockgeräte sowie der
+  noch nicht implementierte Modus `l` – dafür das Docker-Harness unter
+  [`../testing-docker/`](../testing-docker/) (inkl. `run-remote-tests.sh` für
+  einen automatisierten Zwei-Container-Durchlauf) und die Szenarien in
+  [`../TESTING.md`](../TESTING.md).
 - Unit-Tests einzelner Funktionen (z. B. `size_calculation`); dafür müsste der
   Hauptteil der Skripte sourcebar gekapselt werden.

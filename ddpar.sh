@@ -13,6 +13,9 @@ BLOCKSIZEBYTES="1048576"
 COMPRESSION=${COMPRESSION:-0}
 CHECKSUM=${CHECKSUM:-0}
 REMOTE=0
+# Remote-Modus: "n" = netcat, [De]Kompression (falls -c) auf DIESER Maschine,
+# "c" = netcat, [De]Kompression auf der Remote-Maschine
+REMOTE_MODE="n"
 #SSH_SOCKET_PATH="/tmp/ssh_mux_%n_%p_%r"
 SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
 INTERNAL_EXITCODE=0
@@ -34,6 +37,7 @@ function show_help {
   echo "-n NAME                 Eigener Basisname der Backup-Dateien (Default: Basename der Eingabe, nur -m backup)"
   echo "-c                      Komprimierung anfordern, Kompressionslevel zur Zeit nicht einstellbar (Default: -6)"
   echo "                        Mit -r n wird lokal komprimiert, es geht nur der komprimierte Strom über das Netz"
+  echo "                        Mit -r c läuft gzip auf der Remote-Maschine (siehe Remote-Optionen)"
   echo "-s                      Checksumme der einzelnen Teile erstellen"
   echo "-f                      Force - ignore Probleme und erzwinge den Vorgang"
   echo "-r [lnc]                Remote-Verbindung, nur SSH möglich. Remote-Optionen: siehe unten"
@@ -46,7 +50,10 @@ function show_help {
   echo "   Datenübertragung unverschlüsselt über netcat (nur in vertrauenswürdigen Netzen verwenden!)"
   echo "   Zusammen mit -c wird lokal komprimiert (die Remote-Seite benötigt kein gzip)"
   echo "l: GEPLANT, noch nicht implementiert: Übertragung vollständig verschlüsselt"
-  echo "c: GEPLANT, noch nicht implementiert: Kompression auf der Remote-Maschine"
+  echo "c: Wie n, aber [De]Kompression auf der Remote-Maschine (dort wird gzip benötigt):"
+  echo "   -m backup -c: die Rohdaten gehen über netcat, die Gegenseite komprimiert sie in die .gz-Teile"
+  echo "   -m clone  -c: lokal wird komprimiert, die Gegenseite dekomprimiert vor dem Schreiben"
+  echo "                 (damit ist -c im Clone-Modus nur mit -r c möglich)"
 }
 
 function option_analysis {
@@ -93,12 +100,28 @@ function option_analysis {
         ;;
       r)
         REMOTE=1
-        # Bisher ist nur Modus "n" (netcat, Datenkanal unverschlüsselt)
-        # implementiert. "l" (verschlüsselt) und "c" (Remote-Kompression)
-        # sind geplant — hier ehrlich warnen statt still zurückzufallen.
-        if [[ ${OPTARG} =~ [lc] ]]; then
-          echo -e "${WARNCOLOR}[WARN] Remote-Modus '${OPTARG}' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat.${NOCOLOR}"
-        fi
+        # "n" = netcat, [De]Kompression lokal; "c" = netcat, [De]Kompression
+        # auf der Remote-Maschine. "l" (Datenkanal verschlüsselt) ist geplant —
+        # hier ehrlich warnen statt still zurückzufallen.
+        case "${OPTARG}" in
+          n|"") REMOTE_MODE="n";;
+          c)    REMOTE_MODE="c";;
+          l)
+            REMOTE_MODE="n"
+            echo -e "${WARNCOLOR}[WARN] Remote-Modus 'l' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat.${NOCOLOR}"
+            ;;
+          -*)
+            # "-r" ohne Modus: getopts hat bereits die nächste Option als
+            # Argument gelesen. OPTIND zurücksetzen, damit sie regulär
+            # verarbeitet wird, und den Default-Modus verwenden.
+            REMOTE_MODE="n"
+            OPTIND=$((OPTIND - 1))
+            ;;
+          *)
+            echo -e "${ERRORCOLOR}Ungültiger Remote-Modus '${OPTARG}'. Gültige Angaben: l|n|c${NOCOLOR}"
+            exit 1
+            ;;
+        esac
         ;;
       R)
         REMOTE=1
@@ -108,15 +131,37 @@ function option_analysis {
         ;;
       h) show_help; exit 0;;
       \?) echo "Ungültige Option: -${OPTARG}"; show_help; exit 1;;
+      :)
+        # -r darf ohne Argument stehen (Default-Modus n), alle anderen Optionen nicht
+        if [ "${OPTARG}" = "r" ]; then
+          REMOTE=1
+          REMOTE_MODE="n"
+        else
+          echo -e "${ERRORCOLOR}Option -${OPTARG} erfordert ein Argument.${NOCOLOR}"
+          exit 1
+        fi
+        ;;
     esac
   done
-  
+
   # Überprüfung der erforderlichen Parameter
   if [ -z "${INPUT}" ] || [ -z "${OUTPUT}" ] ; then
     echo -e "${ERRORCOLOR}Fehlende Parameter. Bitte geben Sie alle erforderlichen Parameter --input und --output an.${NOCOLOR}"
     exit 1
   fi
+
+  # Modus "c" ohne -c hat nichts zu komprimieren und verhält sich wie "n"
+  if [ "${REMOTE}" -eq 1 ] && [ "${REMOTE_MODE}" = "c" ] && [ "${COMPRESSION}" -ne 1 ]; then
+    echo -e "${WARNCOLOR}[WARN] Remote-Modus 'c' ohne -c: es wird nichts komprimiert, die Übertragung entspricht Modus 'n'.${NOCOLOR}"
+  fi
   }
+
+function remote_compression_active {
+	# Wahr, wenn [De]Kompression auf der Remote-Maschine läuft (-r c zusammen mit -c).
+	# Backup: die Rohdaten gehen über netcat, die Gegenseite komprimiert.
+	# Clone:  lokal wird komprimiert, die Gegenseite dekomprimiert vor dem Schreiben.
+	[ "${REMOTE}" -eq 1 ] && [ "${REMOTE_MODE}" = "c" ] && [ "${COMPRESSION}" -eq 1 ]
+}
 
 function set_colors {
 	# check if stdout is a terminal...
@@ -281,9 +326,13 @@ function check_remote_commands_availability {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion check_remote_commands_availability aufgerufen${NOCOLOR}" >&2
     local commands=("dd" "nc" "df" "tee" "blockdev" "stat" "ss")  # Liste der zu überprüfenden Befehle
 
-    # gzip wird bewusst NICHT verlangt: im Remote-Modus wird lokal komprimiert
+    # Im Modus "n" wird gzip bewusst NICHT verlangt: dort wird lokal komprimiert
     # (local compression), die Remote-Seite schreibt den fertigen gzip-Strom
-    # nur noch per dd in die .gz-Datei.
+    # nur noch per dd in die .gz-Datei. Im Modus "c" läuft gzip dagegen auf der
+    # Gegenseite (Backup: komprimieren, Clone: dekomprimieren).
+    if remote_compression_active; then
+        commands+=("gzip")
+    fi
 
     if [ "$CHECKSUM" -eq 1 ]; then
         commands+=("sha256sum")
@@ -307,10 +356,13 @@ function check_commands_availability {
         commands+=("nc" "ssh")
     fi
 
-    if [ "$COMPRESSION" -eq 1 ]; then
+    # Beim Remote-Backup im Modus "c" komprimiert die Gegenseite, lokal wird
+    # dafür kein gzip gebraucht. Im Clone-Modus "c" komprimiert dagegen DIESE
+    # Maschine (die Gegenseite dekomprimiert), gzip ist also weiterhin nötig.
+    if [ "$COMPRESSION" -eq 1 ] && ! { remote_compression_active && [ "$MODE" = "backup" ]; }; then
         commands+=("gzip")
     fi
-    
+
     if [ "$CHECKSUM" -eq 1 ]; then
         commands+=("sha256sum")
     fi
@@ -523,8 +575,8 @@ function run_clone_parts {
 	local PART_NUM START COUNT_BYTES
 	local dd_in dd_out
 
-	if [ "$COMPRESSION" -eq 1 ]; then
-		echo -e "${WARNCOLOR}[WARN] Kompression (-c) ist im Clone-Modus noch nicht implementiert und wird ignoriert. Sie steht im Backup-Modus (-m backup) zur Verfügung.${NOCOLOR}"
+	if [ "$COMPRESSION" -eq 1 ] && ! remote_compression_active; then
+		echo -e "${WARNCOLOR}[WARN] Kompression (-c) ist im Clone-Modus nur mit Remote-Modus 'c' (-r c) möglich und wird ignoriert. Ein Clone muss auf der Gegenseite wieder dekomprimiert werden; lokal steht sie im Backup-Modus (-m backup) zur Verfügung.${NOCOLOR}"
 	fi
 
 	for ((PART_NUM=0; PART_NUM<NUM_JOBS; PART_NUM++)); do
@@ -536,7 +588,18 @@ function run_clone_parts {
 		dd_in=(dd if="${INPUT}" bs="${BLOCKSIZEBYTES}" iflag=count_bytes,skip_bytes count="${COUNT_BYTES}" skip="${START}")
 		dd_out=(dd of="${output_target}" bs="${BLOCKSIZEBYTES}" oflag=seek_bytes seek="${START}" conv=notrunc)
 
-		if [ $REMOTE -eq 1 ]; then
+		if remote_compression_active; then
+			# Remote-Modus "c": komprimiert wird auf DIESER Maschine, über das
+			# Netz geht nur der komprimierte Strom, die Gegenseite dekomprimiert
+			# ihn vor dem Schreiben (remote decompression). Nur so lässt sich ein
+			# Clone komprimiert übertragen — das Ziel muss die Rohdaten enthalten.
+			if ! setup_remote_listener "gzip -dc | dd of=\"${output_target}\" bs=${BLOCKSIZEBYTES} oflag=seek_bytes seek=${START} conv=notrunc"; then
+				echo -e "${ERRORCOLOR}Remote-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
+				return 1
+			fi
+			echo -e "${INFOCOLOR}${dd_in[*]} | gzip -${COMPRESSION_LEVEL} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | gzip -"${COMPRESSION_LEVEL}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+		elif [ $REMOTE -eq 1 ]; then
 			# Die Empfängerseite läuft auf dem Remote-Host und wird als String
 			# über SSH gestartet; der Pfad ist dort in Anführungszeichen gesetzt.
 			if ! setup_remote_listener "dd of=\"${output_target}\" bs=${BLOCKSIZEBYTES} oflag=seek_bytes seek=${START} conv=notrunc"; then
@@ -672,8 +735,9 @@ function backup_mode {
 	append_metadata "FILE_TYPE=${INPUT_FILE_TYPE}"
 	append_metadata "SPLIT_SIZE=${SPLIT_SIZE}"
 
-	# Auch im Remote-Modus wird komprimiert (lokal, siehe unten), daher gehören
-	# die Kompressions-Metadaten in beiden Fällen in die Metadatendatei.
+	# Auch im Remote-Modus wird komprimiert (je nach -r lokal oder auf der
+	# Gegenseite, siehe unten). Die erzeugten .gz-Teile sind identisch, daher
+	# gehören die Kompressions-Metadaten in allen Fällen in die Metadatendatei.
 	if [ "$COMPRESSION" -eq 1 ]; then
 		append_metadata "COMPRESSION=${COMPRESSION}"
 		append_metadata "COMPRESSION_LEVEL=${COMPRESSION_LEVEL}"
@@ -697,7 +761,18 @@ function backup_mode {
 		dd_in=(dd if="${INPUT}" bs="${BLOCKSIZEBYTES}" iflag=count_bytes,skip_bytes count="${COUNT_BYTES}" skip="${START}")
 		dd_out=(dd of="${PART_BASE}.part" bs="${BLOCKSIZEBYTES}")
 
-		if [ "$REMOTE" -eq 1 ] && [ "$COMPRESSION" -eq 1 ]; then
+		if remote_compression_active; then
+			# Remote netcat backup mit Kompression auf der Gegenseite (-r c):
+			# über das Netz gehen die Rohdaten, gzip läuft auf dem REMOTE-Host
+			# und schreibt dort direkt die .gz-Datei. Das entlastet die lokale
+			# CPU, spart aber keine Bandbreite (dafür siehe -r n).
+			if ! setup_remote_listener "gzip -${COMPRESSION_LEVEL} > \"${PART_BASE}.gz\""; then
+				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
+				break
+			fi
+			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+		elif [ "$REMOTE" -eq 1 ] && [ "$COMPRESSION" -eq 1 ]; then
 			# Remote netcat backup mit lokaler Kompression: gzip läuft auf
 			# DIESER Maschine, über das Netz geht nur der komprimierte Strom.
 			# Die Remote-Seite schreibt ihn unverändert in die .gz-Datei und
@@ -769,6 +844,38 @@ function wait_for_jobs {
 	fi
 	echo -e "${SUCCESSCOLOR}Alle parallelen Jobs erfolgreich beendet.${NOCOLOR}"
 	return 0
+}
+
+function wait_for_remote_listeners {
+	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
+	# Wenn die lokalen Sender fertig sind, schreibt die Gegenseite unter Umständen
+	# noch: im Modus "c" muss dort erst gzip den Rest der Pipe verarbeiten, bevor
+	# die .gz-Datei vollständig ist. Ohne dieses Warten könnte ein direkt
+	# anschließender ddpar-check.sh eine noch unfertige Datei lesen.
+	#
+	# Erkannt wird der sh -c-Elternprozess des Listeners, der bis zum Ende der
+	# gesamten Pipeline lebt. Im Suchmuster wird die erste Ziffer des Ports in
+	# eine Zeichenklasse gesetzt ("[3]0861"), damit die per SSH gestartete Shell,
+	# die das Muster selbst in ihrer Kommandozeile trägt, nicht mitgezählt wird.
+	# Fehlt pgrep auf der Gegenseite, endet die Prüfung sofort (Exit-Code != 0)
+	# und es bleibt beim bisherigen Verhalten.
+	local port pattern attempt
+	local max_attempts=120  # 120 x 0,5 s = 60 s je Teil
+
+	[ "${#REMOTE_LISTENER_PORTS[@]}" -eq 0 ] && return 0
+	echo -e "${INFOCOLOR}Warte auf den Abschluss der Remote-Empfänger ...${NOCOLOR}"
+	for port in "${REMOTE_LISTENER_PORTS[@]}"; do
+		pattern="nc -N -l [${port:0:1}]${port:1}"
+		attempt=0
+		while execute_remote_command "pgrep -f '${pattern}' > /dev/null 2>&1"; do
+			attempt=$((attempt + 1))
+			if [ "${attempt}" -ge "${max_attempts}" ]; then
+				echo -e "${WARNCOLOR}Warnung: Der Remote-Empfänger auf Port ${port} läuft noch. Die Zieldatei ist möglicherweise noch nicht vollständig.${NOCOLOR}"
+				break
+			fi
+			sleep 0.5
+		done
+	done
 }
 
 function cleanup_on_signal {
@@ -854,6 +961,7 @@ case $MODE in
 esac
 
 if [ $REMOTE -eq 1 ]; then
+	wait_for_remote_listeners
 	close_ssh_connection
 	if [ $? -eq 0 ]; then
 		echo -e "${SUCCESSCOLOR}SSH-Verbindung zu ${REMOTE_HOST} erfolgreich gertrennt.${NOCOLOR}"

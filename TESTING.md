@@ -5,10 +5,10 @@ Dieses Dokument enthält Beispiel-Kommandos zum manuellen Testen aller implement
 > **Automatisierte Tests:** Es gibt eine bats-Suite unter [`tests/`](tests/), die
 > zusammen mit ShellCheck in der CI läuft (`.github/workflows/ci.yml`):
 > CLI-Verhalten und Datei-`backup → check → restore`-Roundtrip (schneller Job) sowie
-> Blockgerät- (Loop-Devices) und Remote-Tests (SSH+netcat, Modus `n`) im
+> Blockgerät- (Loop-Devices) und Remote-Tests (SSH+netcat, Modi `n` und `c`) im
 > Integration-Job. Lokal: `make check` bzw. `make test-integration` (root/SSH nötig).
 > Details in [`tests/README.md`](tests/README.md). Die hier dokumentierten Szenarien
-> (echtes Zwei-Host-Remote, Kompression, Modi `l`/`c`) ergänzen das über das
+> (echtes Zwei-Host-Remote, Blockgeräte remote, Modus `l`) ergänzen das über das
 > Docker-Harness unter [`testing-docker/`](testing-docker/).
 
 ---
@@ -233,25 +233,32 @@ sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r l -R $REMOTE_HOST
 
 ### 4.4 Remote Clone – Block Device, lokale Kompression (Modus n + -c)
 
-> **Noch nicht implementiert.** Ein Clone müsste auf der Remote-Seite wieder
-> dekomprimiert werden (remote decompression). `-c` wird im Clone-Modus
-> ignoriert; das Skript gibt eine Warnung aus. Kompression steht im
-> Backup-Modus zur Verfügung (Test 4.13).
+> **Nicht möglich.** Ein Clone muss auf der Remote-Seite wieder dekomprimiert
+> werden; das kann nur Modus `c` (Test 4.5). Mit `-r n` wird `-c` im Clone-Modus
+> ignoriert, das Skript gibt eine Warnung aus.
 
 ```bash
 sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r n -c -R $REMOTE_HOST
 ```
 
-> Erwartung: Warnung „Kompression (-c) ist im Clone-Modus noch nicht
-> implementiert“, danach unkomprimierter Clone.
+> Erwartung: Warnung „Kompression (-c) ist im Clone-Modus nur mit Remote-Modus
+> 'c' (-r c) möglich“, danach unkomprimierter Clone.
 
-### 4.5 Remote Clone – Block Device, remote Kompression (Modus c)
+### 4.5 Remote Clone – Block Device, komprimierter Transfer (Modus c + -c)
 
-Kompression findet auf der Remote-Seite statt.
+Lokal wird komprimiert, die Remote-Seite dekomprimiert vor dem Schreiben
+(*remote decompression*). Über netcat geht nur der komprimierte Strom.
 
 ```bash
-sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r c -R $REMOTE_HOST
+sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -c -r c -R $REMOTE_HOST
+     ./ddpar.sh -i $SOURCE_FILE -o $REMOTE_DEST_DIR -m clone -c -r c -R $REMOTE_HOST
 ```
+
+> **Voraussetzung:** `gzip` auf dem Remote-Host.
+> Erwartung: pro Teil `dd if=… | gzip -6 | nc <host> <PORT>` sowie auf dem
+> Remote-Host `nc -N -l <PORT> | gzip -dc | dd of=… seek=…`.
+> Prüfen wie beim unkomprimierten Clone (Test 4.12) — auf dem Ziel liegen
+> Rohdaten, keine `.gz`-Dateien.
 
 ### 4.6 Remote Backup – Block Device, unkomprimiert (Modus n)
 
@@ -476,8 +483,68 @@ sudo ./ddpar-check.sh -b $REMOTE_BACKUP_DIR/sdb -d $DEST_DEV -r n -R $REMOTE_HOS
 
 - `-s` (Checksummen-Dateien) wird im Remote-Modus nicht angewendet; das Skript
   weist darauf hin. Die Prüfung erfolgt über `ddpar-check.sh -r`.
-- Der Clone-Modus unterstützt `-c` noch nicht (siehe Test 4.4).
-- Kompression auf der Remote-Seite (`-r c`) ist weiterhin offen.
+- Der Clone-Modus unterstützt `-c` nur mit `-r c` (siehe Test 4.4/4.5).
+
+### 4.14 Remote mit [De]Kompression auf der Gegenseite (Modus c + -c)
+
+> **Prinzip:** `gzip`/`zcat` laufen auf dem **Remote-Host** (dort also
+> erforderlich). Beim Backup/Restore gehen die Rohdaten über netcat — das
+> entlastet die lokale CPU, spart aber keine Bandbreite. Die erzeugten
+> `.gz`-Teile sind identisch zu denen aus Test 4.13; Backups aus beiden Modi
+> sind gegenseitig wiederherstell- und prüfbar.
+
+#### 4.14.1 Remote Backup, Kompression auf der Gegenseite
+
+```bash
+sudo ./ddpar.sh -i $SOURCE_DEV  -o $REMOTE_BACKUP_DIR -m backup -c -r c -R $REMOTE_HOST
+     ./ddpar.sh -i $SOURCE_FILE -o $REMOTE_BACKUP_DIR -m backup -c -r c -R $REMOTE_HOST
+```
+
+> Erwartung: pro Teil `dd if=… | nc <host> <PORT>` sowie auf dem Remote-Host
+> `nc -N -l <PORT> | gzip -6 > …-N.gz`. Erzeugte Dateien auf dem Remote-Host:
+> `$REMOTE_BACKUP_DIR/sdb-0.gz` … + `sdb-metadata.txt` (mit `COMPRESSION=1`).
+> Vor dem Beenden meldet das Skript „Warte auf den Abschluss der
+> Remote-Empfänger …“, damit die `.gz`-Dateien vollständig geschrieben sind.
+
+#### 4.14.2 Remote Restore, Dekompression auf der Gegenseite
+
+```bash
+sudo ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/sdb -o $DEST_DEV -r c -R $REMOTE_HOST
+     ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/ddpar_test.img -o $DEST_DIR/ddpar_test.img -r c -R $REMOTE_HOST
+```
+
+> Erwartung: `Source is remote (compressed, remote decompression)` und pro Teil
+> `zcat "…-N.gz" | nc -N -l <PORT>` auf dem Remote-Host sowie lokal
+> `nc <host> <PORT> | dd of=… seek=…` (**ohne** lokales `zcat`).
+
+#### 4.14.3 Remote Check, Hashing auf der Gegenseite
+
+```bash
+./ddpar-check.sh -s $SOURCE_FILE -b $REMOTE_BACKUP_DIR/ddpar_test.img -r c -R $REMOTE_HOST
+sudo ./ddpar-check.sh -b $REMOTE_BACKUP_DIR/sdb -d $DEST_DEV -r c -R $REMOTE_HOST
+```
+
+> Erwartung: `Segment N: OK (<hash>)` je Segment. Ausgepackt und gehasht wird
+> auf dem Remote-Host (`zcat …gz | sha256sum`), über SSH geht nur der Hash.
+
+#### 4.14.4 Interoperabilität der Modi
+
+Ein mit `-r c` erzeugtes Backup lässt sich mit `-r n` wiederherstellen/prüfen
+und umgekehrt — die `.gz`-Teile unterscheiden sich nicht:
+
+```bash
+./ddpar.sh -i $SOURCE_FILE -o $REMOTE_BACKUP_DIR -m backup -c -r c -R $REMOTE_HOST
+./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/ddpar_test.img -o $DEST_DIR/ddpar_test.img -r n -R $REMOTE_HOST
+./ddpar-check.sh -s $SOURCE_FILE -b $REMOTE_BACKUP_DIR/ddpar_test.img -r n -R $REMOTE_HOST
+```
+
+#### 4.14.5 Hinweise / bekannte Grenzen
+
+- Fehlt `gzip`/`zcat` auf dem Remote-Host, brechen die Skripte mit einer
+  klaren Meldung ab (in Modus `n` wird dort kein `gzip` benötigt).
+- `-r c` ohne `-c` hat nichts zu [de]komprimieren; das Skript weist darauf hin
+  und überträgt wie in Modus `n`.
+- Die Nutzdaten laufen auch in Modus `c` unverschlüsselt über netcat.
 
 ---
 

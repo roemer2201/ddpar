@@ -18,7 +18,9 @@ unterstützt: Ein nicht gleichmäßig verteilbarer Rest wird vom letzten Teil
 
 - Bash, GNU coreutils (`dd` mit `count_bytes`/`skip_bytes`/`seek_bytes`), `file`, `blockdev`
 - `gzip` (bei Kompression), `sha256sum` (bei Checksummen)
-- Für Remote-Betrieb: `ssh`, `nc` (netcat-openbsd), `ss`; optional `sshpass` für Passwort-Login
+- Für Remote-Betrieb: `ssh`, `nc` (netcat-openbsd), `ss`; optional `sshpass` für Passwort-Login.
+  Auf dem Remote-Host zusätzlich `gzip` bei `-r c` (bei `-r n` **nicht** nötig) und
+  `pgrep` (procps), damit auf den Abschluss der Empfänger gewartet werden kann
 
 ## Schnellstart
 
@@ -65,24 +67,44 @@ unterstützt: Ein nicht gleichmäßig verteilbarer Rest wird vom letzten Teil
 # Restore daraus: zcat läuft ebenfalls lokal (die Kompression steht in den Metadaten)
 ./ddpar-restore.sh -i /remote/backup/sdb -o /dev/sdc -r n -R user@zielhost
 
+# Dasselbe mit Kompression auf der Gegenseite (-r c): dort wird gzip benötigt
+./ddpar.sh -i /dev/sdb -o /remote/backup -m backup -c -r c -R user@zielhost
+./ddpar-restore.sh -i /remote/backup/sdb -o /dev/sdc -r c -R user@zielhost
+
+# Clone komprimiert übertragen: nur mit -r c (die Gegenseite dekomprimiert)
+./ddpar.sh -i /dev/sdb -o /dev/sdc -m clone -c -r c -R user@zielhost
+
 # Remote-Check (nur SHA256-Hashes laufen über SSH)
 ./ddpar-check.sh -s /dev/sdb -b /remote/backup/sdb -r n -R user@zielhost
 ```
 
-**Kompression im Remote-Modus (`-c` zusammen mit `-r n`)** arbeitet als *local
-[de]compression*: `gzip` bzw. `zcat` laufen auf der lokalen Maschine, über das
-Netz geht nur der komprimierte Strom, und die Gegenseite schreibt bzw. liest die
-`.gz`-Teile mit `dd`. Das spart Bandbreite und setzt auf dem Remote-Host kein
-`gzip` voraus. Beim Check eines komprimierten Remote-Backups werden die
-`.gz`-Teile über SSH geholt und lokal ausgepackt; verglichen werden die Hashes
-der Rohdaten.
+**Kompression im Remote-Modus (`-c`)** gibt es in zwei Varianten — die erzeugten
+`.gz`-Teile sind identisch, ein Backup aus einem Modus lässt sich also im
+jeweils anderen wiederherstellen und prüfen:
+
+- **`-r n` — *local [de]compression*:** `gzip` bzw. `zcat` laufen auf der
+  lokalen Maschine, über das Netz geht nur der komprimierte Strom, die
+  Gegenseite schreibt bzw. liest die `.gz`-Teile mit `dd`. Das spart Bandbreite
+  und setzt auf dem Remote-Host **kein** `gzip` voraus. Beim Check werden die
+  `.gz`-Teile über SSH geholt und lokal ausgepackt.
+- **`-r c` — *remote [de]compression*:** `gzip` bzw. `zcat` laufen auf dem
+  Remote-Host (dort also **erforderlich**). Beim Backup/Restore gehen die
+  Rohdaten über das Netz — das entlastet die lokale CPU, spart aber keine
+  Bandbreite. Der Check lässt die Gegenseite auspacken und hashen, es geht nur
+  der Hash über SSH. Beim **Clone** ist es umgekehrt: dort komprimiert die
+  lokale Seite und die Gegenseite packt vor dem Schreiben wieder aus — nur so
+  ist `-c` im Clone-Modus überhaupt möglich (mit `-r n` folgt eine Warnung und
+  der Clone läuft unkomprimiert).
+
+Verglichen werden in allen Fällen die Hashes der Rohdaten.
 
 **Sicherheitshinweise zum Remote-Modus:**
 
-- Der Verbindungsaufbau und die Steuerung laufen über SSH, die **Nutzdaten im
-  Modus `n` jedoch unverschlüsselt über netcat**. Nur in vertrauenswürdigen
-  Netzen verwenden. Ein vollständig verschlüsselter Modus (`l`) ist geplant,
-  aber noch nicht implementiert.
+- Der Verbindungsaufbau und die Steuerung laufen über SSH, die **Nutzdaten in
+  den Modi `n` und `c` jedoch unverschlüsselt über netcat** (Kompression ist
+  keine Verschlüsselung). Nur in vertrauenswürdigen Netzen verwenden. Ein
+  vollständig verschlüsselter Modus (`l`) ist geplant, aber noch nicht
+  implementiert.
 - Host-Keys werden mit `StrictHostKeyChecking=accept-new` behandelt: Unbekannte
   Hosts werden beim Erstkontakt akzeptiert, ein **geänderter** Host-Key führt
   zum Abbruch.
@@ -162,27 +184,34 @@ Strom; die Remote-Seite benötigt kein `gzip`.
 | block dev | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 | file | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 
-#### remote [de]compression
+#### remote [de]compression (`-r c`)
+`gzip`/`zcat` laufen auf der Gegenseite (dort erforderlich); über netcat gehen
+die Rohdaten. Der Check hasht remote, es geht nur der Hash über SSH.
+
 | | backup gzip (check) | restore gzip (check) |
 |-----------|----------|----------|
-| block dev | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
-| file | :stop_sign: (:stop_sign:) | :stop_sign: (:stop_sign:) |
+| block dev | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
+| file | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
 
 #### compressed transfer (compression+decompression before and after transfer)
+Clone mit `-c` + `-r c`: lokal wird komprimiert, die Gegenseite dekomprimiert
+vor dem Schreiben.
+
 | | clone |
 |----------|----------|
-| block dev | :stop_sign: |
-| file | :stop_sign: |
+| block dev | :heavy_check_mark: |
+| file | :heavy_check_mark: |
 
 ## To Do
 
 - ddpar.sh:
-  - Checksummen/Kompression auch im Clone-Modus (analog Backup-Modus; `-c` wird
-    dort derzeit mit einer Warnung ignoriert)
+  - Checksummen im Clone-Modus (analog Backup-Modus). Kompression im
+    Clone-Modus ist mit `-r c` möglich; lokal wird `-c` dort weiterhin mit einer
+    Warnung ignoriert
   - `-s` im Remote-Modus: `.sha256`-Dateien auf der Gegenseite ablegen (heute
     prüft man Remote-Backups mit `ddpar-check.sh -r` über Laufzeit-Hashes)
 - `BASE_NAME` als Pfad für Checksummen-Dateien von Clones nutzen (wenn Checksummen angefordert)
 - Kompression + `-s`: Checksumme optional auch für die komprimierten Dateien berechnen (derzeit nur für die Rohdaten)
 - Remoting:
-  - Verschlüsselter Datenkanal (`-r l`) und Remote-Kompression (`-r c`)
+  - Verschlüsselter Datenkanal (`-r l`)
   - Remote-Eingabe mit lokaler Ausgabe (noch nicht durchdacht)

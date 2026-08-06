@@ -55,14 +55,17 @@ Manuelle Tests: siehe `TESTING.md`.
 
 ## Bekannte Einschränkungen / offene Baustellen
 
-- Remote Backup, Remote Restore und Remote Checks (netcat) sind implementiert — unkomprimiert und mit **lokaler [De]Kompression** (`-c` + `-r n`: gzip/zcat laufen lokal, die Gegenseite schreibt/liest nur `.gz`-Dateien und braucht kein gzip)
-- Offen bleibt Kompression auf der Remote-Seite (`-r c`) sowie `-c` im Clone-Modus (wird dort mit Warnung ignoriert)
+- Remote Clone, Backup, Restore und Checks (netcat) sind implementiert — unkomprimiert, mit **lokaler [De]Kompression** (`-c` + `-r n`: gzip/zcat laufen lokal, die Gegenseite schreibt/liest nur `.gz`-Dateien und braucht kein gzip) und mit **Remote-[De]Kompression** (`-c` + `-r c`: gzip/zcat laufen auf der Gegenseite, dort erforderlich)
+- `-c` im Clone-Modus ist nur mit `-r c` möglich (die Gegenseite dekomprimiert vor dem Schreiben); ohne `-r c` folgt eine Warnung und der Clone läuft unkomprimiert
+- Offen bleibt der verschlüsselte Datenkanal (`-r l`, fällt mit Warnung auf `n` zurück)
+- Die `.gz`-Teile aus `-r n` und `-r c` sind identisch — Backups sind zwischen den Modi austauschbar
 - `-s` (Checksummen-Dateien) wird im Remote-Modus nicht angewendet; Remote-Backups prüft man mit `ddpar-check.sh -r` über Laufzeit-Hashes
 - Remote Checks (`ddpar-check.sh -r`) vergleichen nur SHA256-Hashes je Segment (lokal vs. per SSH) — kein netcat-Datentransfer nötig
 - `RANDOM` in Bash liefert nur 0–32767 → Remote-Ports werden aus dem Bereich 10000–42767 gewählt
 - `fallocate` funktioniert nicht auf Block-Devices (wird korrekt übersprungen)
+- Nach dem Ende der lokalen Sender kann die Gegenseite noch schreiben (im Modus `c` puffert dort gzip); `wait_for_remote_listeners()` wartet per `pgrep -f "nc -N -l [P]ORT"` auf den Abschluss — die Zeichenklasse verhindert, dass die per SSH gestartete Shell sich selbst matcht
 - Beliebige Eingabegrößen: `SPLIT_SIZE` wird auf die Blockgröße abgerundet, der letzte Teil überträgt den Rest (`part_bytes`, dd-Flags `count_bytes`/`skip_bytes`/`seek_bytes`)
-- Remote-Modus-Flags (`-r l/n/c`) sind noch nicht vollständig implementiert
+- Von den Remote-Modus-Flags (`-r l/n/c`) sind `n` und `c` implementiert, `l` nicht
 
 ## Branch-Strategie
 
