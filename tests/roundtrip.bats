@@ -158,3 +158,77 @@ load helpers
   [ "$status" -eq 1 ]
   [[ "$output" == *"ohne Checksummen"* ]]
 }
+
+@test "Refused clone returns failure without changing the existing file" {
+  printf 'source' > "${TMP}/source.bin"
+  printf 'existing' > "${TMP}/target.bin"
+
+  vrun "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source.bin" -o "${TMP}/target.bin" -j 1 -b 1
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${TMP}/target.bin")" = 'existing' ]
+}
+
+@test "Forced clone removes the old suffix and check rejects extra bytes" {
+  printf 'source' > "${TMP}/source.bin"
+  printf 'existing and longer' > "${TMP}/target.bin"
+
+  vrun "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source.bin" -o "${TMP}/target.bin" -j 1 -b 1 -f
+  [ "${status}" -eq 0 ]
+  cmp "${TMP}/source.bin" "${TMP}/target.bin"
+
+  printf 'extra' >> "${TMP}/target.bin"
+  vrun "${REPO_ROOT}/ddpar-check.sh" -s "${TMP}/source.bin" -d "${TMP}/target.bin" -j 1 -B 1
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"Zieldatei hat"* ]]
+}
+
+@test "Restore rejects a short backup part before opening the target" {
+  printf '12345678901234567890' > "${TMP}/source.bin"
+  mkdir -p "${TMP}/backup"
+  vrun "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source.bin" -o "${TMP}/backup" -m backup -j 2 -b 4
+  [ "${status}" -eq 0 ]
+  truncate -s 1 "${TMP}/backup/source.bin-1.part"
+
+  vrun "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/backup/source.bin" -o "${TMP}/target.bin" -y
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"statt der erwarteten"* ]]
+  [ ! -e "${TMP}/target.bin" ]
+}
+
+@test "Check compares despite different metadata and source file types" {
+  printf 'original source data' > "${TMP}/source.bin"
+  mkdir -p "${TMP}/backup"
+  vrun "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source.bin" -o "${TMP}/backup" -m backup -s -j 2 -b 4
+  [ "${status}" -eq 0 ]
+  sed -i 's/^FILE_TYPE=.*/FILE_TYPE=block special (8\/0)/' "${TMP}/backup/source.bin-metadata.txt"
+  printf 'changed' > "${TMP}/source.bin"
+
+  vrun "${REPO_ROOT}/ddpar-check.sh" -s "${TMP}/source.bin" -b "${TMP}/backup/source.bin"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"FAILED"* ]]
+}
+
+@test "Backup name with spaces works on repeated backup and restore" {
+  printf 'original source data' > "${TMP}/source.bin"
+  mkdir -p "${TMP}/backup"
+  vrun "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source.bin" -o "${TMP}/backup" -m backup -j 2 -b 4 -n 'with space'
+  [ "${status}" -eq 0 ]
+  vrun "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source.bin" -o "${TMP}/backup" -m backup -j 2 -b 4 -n 'with space'
+  [ "${status}" -eq 0 ]
+  [ "$(grep -c '^NUM_JOBS=' "${TMP}/backup/with space-metadata.txt")" -eq 1 ]
+
+  vrun "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/backup/with space" -o "${TMP}/target.bin" -y
+  [ "${status}" -eq 0 ]
+  cmp "${TMP}/source.bin" "${TMP}/target.bin"
+}
+
+@test "Literal command substitution in a directory name is not executed" {
+  printf 'source' > "${TMP}/source.bin"
+  mkdir -p "${TMP}/out\$(touch injected)"
+  cd "${TMP}"
+
+  vrun "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source.bin" -o "${TMP}/out\$(touch injected)" -j 1 -b 1
+  [ "${status}" -eq 0 ]
+  [ ! -e "${TMP}/injected" ]
+  cmp "${TMP}/source.bin" "${TMP}/out\$(touch injected)/source.bin"
+}

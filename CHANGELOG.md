@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased] – Review-Korrekturen
+
+- Lokale Pfade werden ohne `eval` als Argumente übergeben; Remote-Pfade werden
+  für die Shell gequotet. Leerzeichen, Apostrophe und wörtliche `$()`-Ausdrücke
+  bleiben damit Dateinamen und werden nicht als Befehle ausgeführt.
+- Clone, Backup, Restore und Check melden Fehler, wenn keine Jobs gestartet
+  wurden. Die Parameter für Jobanzahl und Blockgröße werden validiert.
+- Vor dem Restore wird die Länge aller unkomprimierten Backup-Teile geprüft.
+  Beim erzwungenen Datei-Clone wird ein altes Dateiende entfernt; der Clone-Check
+  berücksichtigt die Gesamtgröße der Zieldatei.
+- Remote-Jobs bleiben über SSH verbunden und geben den Exit-Status ihrer
+  gesamten Pipeline zurück. Fehlgeschlagene Remote-Schreibvorgänge und Timeouts
+  beenden den Aufruf mit Fehlerstatus.
+- Regressionstests für diese Fälle und für wiederholte Backups mit Leerzeichen
+  im Basisnamen ergänzt.
+
 ## [Unreleased] – branch claude/remote-netcat-decompression-fdxwqa (Remote netcat mit Remote-[De]Kompression)
 
 ### Hinzugefügt

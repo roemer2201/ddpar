@@ -34,6 +34,35 @@ remote_teardown() {
   cmp "$TMP/src.bin" "$TMP/rdest/src.bin"
 }
 
+@test "Remote clone reports a failure from the remote writer" {
+  require_remote_support
+  ssh "${REMOTE_TEST_HOST}" 'test -w /dev/full' || skip "/dev/full is unavailable remotely"
+  make_testfile "${TMP}/src.bin" 1
+
+  run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/src.bin" -o /dev/full -f -j 1 -r n -R "${REMOTE_TEST_HOST}"
+  remote_teardown
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"Remote-Empfänger"* ]]
+}
+
+@test "Remote backup paths with quotes and literal substitution roundtrip safely" {
+  require_remote_support
+  make_testfile "${TMP}/src.bin" 1
+  mkdir -p "${TMP}/back\$(touch injected)"
+
+  run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/src.bin" -o "${TMP}/back\$(touch injected)" \
+    -m backup -j 2 -n "odd' name" -r n -R "${REMOTE_TEST_HOST}"
+  remote_teardown
+  [ "${status}" -eq 0 ]
+  [ ! -e "${TMP}/injected" ]
+
+  run "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/back\$(touch injected)/odd' name" \
+    -o "${TMP}/restored.bin" -y -r n -R "${REMOTE_TEST_HOST}"
+  remote_teardown
+  [ "${status}" -eq 0 ]
+  cmp "${TMP}/src.bin" "${TMP}/restored.bin"
+}
+
 @test "Remote Clone mit -r ohne Modusangabe nutzt Modus n" {
   require_remote_support
 

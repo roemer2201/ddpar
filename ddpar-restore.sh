@@ -1,4 +1,8 @@
 #!/bin/bash
+#
+# Restore segmented backups into a file or block device.
+# Flow: read and validate metadata and parts; prepare the target; restore all
+# segments; collect local and remote worker results.
 
 # Fehler in zcat-/dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
 # sonst zählt nur der letzte Befehl (z.B. ein erfolgreiches dd of=...).
@@ -160,6 +164,12 @@ function execute_remote_command {
   return $?
 }
 
+# Quote one path or command string for the remote login shell.
+function shell_quote {
+  local escaped="${1//\'/\'\\\'\'}"
+  printf "'%s'" "${escaped}"
+}
+
 function execute_remote_background_command {
   [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
   local command=$1
@@ -167,7 +177,9 @@ function execute_remote_background_command {
     echo "Fehler: Kein Befehl zum Ausführen angegeben."
     return 1
   fi
-  ssh -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "nohup sh -c \"${command}\" > /tmp/ddpar.log 2>&1 &"
+  # SSH stays alive until the remote sender exits; its status is checked later.
+  ssh -n -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "bash -o pipefail -c $(shell_quote "${command}")" &
+  REMOTE_SSH_PID=$!
 }
 
 function close_ssh_connection {
@@ -239,8 +251,11 @@ function remote_restore_commands {
   done
   if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     echo "Process did not start on port ${CURRENT_REMOTE_PORT} after $MAX_ATTEMPTS attempts."
+    kill "${REMOTE_SSH_PID}" 2>/dev/null
+    wait "${REMOTE_SSH_PID}" 2>/dev/null
     return 1
   fi
+  register_remote_job "${REMOTE_SSH_PID}" "Remote-Sender Port ${CURRENT_REMOTE_PORT}"
 }
 
 # Verwaltung der parallelen Hintergrund-Jobs:
@@ -250,10 +265,17 @@ function remote_restore_commands {
 JOB_PIDS=()
 JOB_LABELS=()
 REMOTE_LISTENER_PORTS=()
+REMOTE_JOB_PIDS=()
+REMOTE_JOB_LABELS=()
 
 function register_job {
   JOB_PIDS+=("$1")
   JOB_LABELS+=("$2")
+}
+
+function register_remote_job {
+  REMOTE_JOB_PIDS+=("${1}")
+  REMOTE_JOB_LABELS+=("${2}")
 }
 
 function wait_for_jobs {
@@ -267,6 +289,36 @@ function wait_for_jobs {
       failed=$((failed + 1))
     fi
   done
+  if [ "${#JOB_PIDS[@]}" -eq 0 ]; then
+    echo "Fehler: Es wurde kein Restore-Job gestartet." >&2
+    failed=$((failed + 1))
+  fi
+  # A local receiver failure can leave an unused remote sender listening.
+  if [ "${failed}" -gt 0 ]; then
+    for i in "${!REMOTE_JOB_PIDS[@]}"; do
+      kill "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null || true
+    done
+  fi
+  for i in "${!REMOTE_JOB_PIDS[@]}"; do
+    local attempts=0
+    while kill -0 "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null && [ "${attempts}" -lt 240 ]; do
+      sleep 0.5
+      attempts=$((attempts + 1))
+    done
+    if kill -0 "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null; then
+      echo "Fehler: ${REMOTE_JOB_LABELS[$i]} hat das Zeitlimit überschritten." >&2
+      kill "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null || true
+      failed=$((failed + 1))
+    fi
+    wait "${REMOTE_JOB_PIDS[$i]}"
+    rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      echo "Fehler: ${REMOTE_JOB_LABELS[$i]} ist mit Exit-Code ${rc} fehlgeschlagen." >&2
+      failed=$((failed + 1))
+    fi
+  done
+  REMOTE_JOB_PIDS=()
+  REMOTE_JOB_LABELS=()
   JOB_PIDS=()
   JOB_LABELS=()
   if [ $failed -gt 0 ]; then
@@ -348,8 +400,9 @@ function restore_split_image {
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is remote (compressed, remote decompression)"
       fi
-      if ! remote_restore_commands "zcat \"${INPUT_FILES}${PART_NUM}.gz\""; then
+      if ! remote_restore_commands "zcat $(shell_quote "${INPUT_FILES}${PART_NUM}.gz")"; then
         echo "Remote-Restore-Sender für Teil ${PART_NUM} konnte nicht gestartet werden."
+        INTERNAL_EXITCODE=1
         break
       fi
       echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | ${dd_out[*]}"
@@ -361,8 +414,9 @@ function restore_split_image {
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is remote (compressed, local decompression)"
       fi
-      if ! remote_restore_commands "dd if=\"${INPUT_FILES}${PART_NUM}.gz\" bs=${BLOCKSIZEBYTES} iflag=fullblock"; then
+      if ! remote_restore_commands "dd if=$(shell_quote "${INPUT_FILES}${PART_NUM}.gz") bs=${BLOCKSIZEBYTES} iflag=fullblock"; then
         echo "Remote-Restore-Sender für Teil ${PART_NUM} konnte nicht gestartet werden."
+        INTERNAL_EXITCODE=1
         break
       fi
       echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | zcat | ${dd_out[*]}"
@@ -372,8 +426,9 @@ function restore_split_image {
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is remote (uncompressed)"
       fi
-      if ! remote_restore_commands "dd if=\"${INPUT_FILES}${PART_NUM}.part\" bs=${BLOCKSIZEBYTES} iflag=fullblock"; then
+      if ! remote_restore_commands "dd if=$(shell_quote "${INPUT_FILES}${PART_NUM}.part") bs=${BLOCKSIZEBYTES} iflag=fullblock"; then
         echo "Remote-Restore-Sender für Teil ${PART_NUM} konnte nicht gestartet werden."
+        INTERNAL_EXITCODE=1
         break
       fi
       echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | ${dd_out[*]}"
@@ -397,13 +452,13 @@ function restore_split_image {
 
 
 # Create spinoff variables
-INPUT_PATH=$(dirname $INPUT)
-INPUT_FILE_BASENAME=$(basename $INPUT)
+INPUT_PATH=$(dirname -- "${INPUT}")
+INPUT_FILE_BASENAME=$(basename -- "${INPUT}")
 INPUT_FILES="${INPUT_PATH}/${INPUT_FILE_BASENAME}-"
 #OUTPUT_PATH=/dev
 #OUTPUT_FILE_BASENAME=sdi
 #OUTPUT_FILE="${OUTPUT_PATH}/${OUTPUT_FILE_BASENAME}"
-OUTPUT_FILE_TYPE="$(file -b $OUTPUT)"
+OUTPUT_FILE_TYPE="$(file -b -- "${OUTPUT}")"
 METADATA_FILE="${INPUT_FILES}metadata.txt"
 
 # Get parameters from metadata file (lokal oder remote)
@@ -416,7 +471,7 @@ if [ $REMOTE -eq 1 ]; then
   done
   connect_ssh
   METADATA_SRC=$(mktemp)
-  execute_remote_command "cat \"$METADATA_FILE\"" > "$METADATA_SRC" 2>/dev/null
+  execute_remote_command "cat -- $(shell_quote "${METADATA_FILE}")" > "${METADATA_SRC}" 2>/dev/null
   if [ ! -s "$METADATA_SRC" ]; then
     echo "Die Metadatendatei $METADATA_FILE auf $REMOTE_HOST existiert nicht oder ist leer."
     rm -f "$METADATA_SRC"
@@ -438,6 +493,12 @@ INPUT_FILE_TYPE=$(grep "^FILE_TYPE=" "$METADATA_SRC" | cut -d "=" -f 2)
 BLOCKSIZEBYTES=$(grep "^BLOCKSIZEBYTES=" "$METADATA_SRC" | cut -d "=" -f 2)
 COMPRESSION=$(grep "^COMPRESSION=" "$METADATA_SRC" | cut -d "=" -f 2)
 COMPRESSION_LEVEL=$(grep "^COMPRESSION_LEVEL=" "$METADATA_SRC" | cut -d "=" -f 2)
+
+if ! [[ "${NUM_JOBS}" =~ ^[1-9][0-9]*$ && "${BLOCKSIZEBYTES}" =~ ^[1-9][0-9]*$ &&
+        "${INPUT_SIZE}" =~ ^[0-9]+$ && "${SPLIT_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Fehler: Ungültige oder unvollständige numerische Backup-Metadaten." >&2
+  exit 1
+fi
 
 if [ $REMOTE -eq 1 ] && [ "$REMOTE_MODE" = "c" ] && [ -z "$COMPRESSION" ]; then
   echo "[WARN] Remote-Modus 'c' bei unkomprimiertem Backup: es wird nichts dekomprimiert, die Übertragung entspricht Modus 'n'."
@@ -468,17 +529,37 @@ fi
 # Leserechte auf die Teil-Dateien vorab prüfen, damit der Restore nicht erst
 # mitten im parallelen Lauf an fehlenden Rechten scheitert (lokal; remote
 # liest der Remote-Host die Teile).
-if [ $REMOTE -ne 1 ]; then
-  if [ ! -z "$COMPRESSION" ]; then
-    FIRST_PART="${INPUT_FILES}0.gz"
+# Check every part before touching the destination. In particular, dd treats
+# early EOF as a successful read, so an uncompressed short part needs an
+# explicit length check against its expected segment size.
+for ((part=0; part<NUM_JOBS; part++)); do
+  if [ -n "${COMPRESSION}" ]; then
+    part_file="${INPUT_FILES}${part}.gz"
   else
-    FIRST_PART="${INPUT_FILES}0.part"
+    part_file="${INPUT_FILES}${part}.part"
   fi
-  if [ ! -r "$FIRST_PART" ]; then
-    echo "Fehler: ${FIRST_PART} existiert nicht oder ist nicht lesbar."
+  if [ "${REMOTE}" -eq 1 ]; then
+    if ! execute_remote_command "test -r $(shell_quote "${part_file}")"; then
+      echo "Fehler: Remote-Teil ${part_file} fehlt oder ist nicht lesbar." >&2
+      exit 1
+    fi
+    if [ -z "${COMPRESSION}" ]; then
+      part_size=$(execute_remote_command "stat -c %s -- $(shell_quote "${part_file}")") || exit 1
+    fi
+  else
+    if [ ! -r "${part_file}" ]; then
+      echo "Fehler: ${part_file} fehlt oder ist nicht lesbar." >&2
+      exit 1
+    fi
+    if [ -z "${COMPRESSION}" ]; then
+      part_size=$(stat -c %s -- "${part_file}") || exit 1
+    fi
+  fi
+  if [ -z "${COMPRESSION}" ] && [ "${part_size}" -ne "$(part_bytes "${part}")" ]; then
+    echo "Fehler: Teil ${part_file} hat ${part_size} Bytes statt der erwarteten $(part_bytes "${part}") Bytes." >&2
     exit 1
   fi
-fi
+done
 
 # Überprüfung der erforderlichen Parameter
 if [ -z "$INPUT_PATH" ] || [ -z "$INPUT_FILE_BASENAME" ] || [ -z "$OUTPUT" ]; then
@@ -486,14 +567,14 @@ if [ -z "$INPUT_PATH" ] || [ -z "$INPUT_FILE_BASENAME" ] || [ -z "$OUTPUT" ]; th
   exit 1
 fi
 
-if [ -e $OUTPUT ]; then
+if [ -e "${OUTPUT}" ]; then
   # Determine the type of the output
-  OUTPUT_FILE_TYPE=$(file -b $OUTPUT)
+  OUTPUT_FILE_TYPE=$(file -b -- "${OUTPUT}")
   # Use the appropriate command to determine destination types and sizes
   case "$OUTPUT_FILE_TYPE" in
     # Wenn OUTPUT_FILE ein Blockdevice ist, prüfen, ob OUTPUT_FILE groß genug ist.
     "block special"*)
-      OUTPUT_SIZE=$(blockdev --getsize64 $OUTPUT)
+      OUTPUT_SIZE=$(blockdev --getsize64 "${OUTPUT}")
       if [ "$INPUT_SIZE" -gt "$OUTPUT_SIZE" ]; then
         echo "Fehler: Die Eingabegröße ($INPUT_SIZE) ist größer als die Ausgabegröße ($OUTPUT_SIZE)."
         exit 1

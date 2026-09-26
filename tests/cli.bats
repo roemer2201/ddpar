@@ -36,6 +36,15 @@ load helpers
   [[ "$output" == *"Ungültiger Remote-Modus"* ]]
 }
 
+@test "ddpar.sh lehnt null Jobs und null Blockgroesse ab" {
+  vrun "$REPO_ROOT/ddpar.sh" -i /etc/hostname -o "$TMP" -m backup -j 0
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"positive ganze Zahlen"* ]]
+
+  vrun "$REPO_ROOT/ddpar.sh" -i /etc/hostname -o "$TMP" -m backup -b 0
+  [ "$status" -eq 2 ]
+}
+
 # --- ddpar-restore.sh ---
 
 @test "ddpar-restore.sh -h zeigt die Hilfe" {

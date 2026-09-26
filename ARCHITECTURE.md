@@ -25,8 +25,9 @@ die dd-Flags `count_bytes`/`skip_bytes`/`seek_bytes`.
 
 ## Pipe-Architektur
 
-Je nach aktivierten Optionen wird die Pipe dynamisch zusammengebaut in `$FULL_CMD`
-und dann per `eval "${FULL_CMD}"` ausgeführt.
+Je nach aktivierten Optionen werden die Teil-Pipelines mit Argument-Arrays
+aufgebaut und direkt ausgeführt. Remote-Pfade werden vor dem Einbetten in einen
+SSH-Befehl als Shell-Argumente gequotet.
 
 ### Backup lokal, unkomprimiert
 
@@ -61,7 +62,7 @@ dd if=INPUT ... | nc REMOTE_HOST PORT  &
 
 **Remote (startet zuerst als Listener):**
 ```
-nc -N -l PORT | dd of=OUTPUT ...  &   (läuft im Hintergrund via nohup + SSH)
+nc -N -l PORT | dd of=OUTPUT ...  (SSH-Prozess bleibt lokal im Hintergrund verbunden)
 ```
 
 Das Skript prüft nach dem Start des Remote-Listeners per `ss -tln`, ob der Port
@@ -181,13 +182,11 @@ allen Fällen die Hashes der **Rohdaten** des Segments.
 
 Beim Remote-Clone und Remote-Backup schreibt die Gegenseite: wenn der lokale
 Sender fertig ist, kann dort noch gepuffertes Material unterwegs sein — im Modus
-`c` muss zusätzlich `gzip` den Rest der Pipe verarbeiten. `wait_for_remote_listeners()`
-wartet daher vor dem Schließen der SSH-Verbindung, bis der `sh -c`-Elternprozess
-jedes Listeners beendet ist (`pgrep -f "nc -N -l [P]ORT"`; die erste Ziffer steht
-in einer Zeichenklasse, damit die per SSH gestartete Shell sich nicht selbst
-matcht). Ohne dieses Warten könnte ein direkt anschließender `ddpar-check.sh`
-eine noch unvollständige Datei lesen. Fehlt `pgrep` auf der Gegenseite, wird
-nicht gewartet.
+`c` muss zusätzlich `gzip` den Rest der Pipe verarbeiten. Der lokal gestartete
+SSH-Prozess bleibt daher bis zum Ende der Remote-Pipeline verbunden. Die Pipeline
+läuft mit Bash `pipefail`; `wait_for_jobs()` sammelt sowohl die lokalen als auch
+die entfernten Exit-Status ein. Ein Fehler auf der Gegenseite oder ein Timeout
+führt zu einem Fehlerstatus des Aufrufs.
 
 ---
 
@@ -267,9 +266,9 @@ Modus `n` braucht **kein** `gzip` auf der Gegenseite, Modus `c` schon
 | `establish_ssh_connection` | SSH-Verbindung aufbauen (mit oder ohne Passwort via sshpass) |
 | `connect_ssh` | SSH-Verbindung prüfen und ggf. aufbauen |
 | `is_ssh_socket_alive` | Prüft ob der SSH-Kontroll-Socket noch aktiv ist |
-| `execute_command` | Befehl lokal oder remote ausführen |
+| `execute_command` | Argument-Array lokal direkt, remote mit Shell-Quoting ausführen |
 | `execute_remote_command` | Befehl immer remote via SSH ausführen |
-| `execute_remote_background_command` | Befehl remote im Hintergrund starten (nohup) |
+| `execute_remote_background_command` | Remote-Pipeline über einen lokal im Hintergrund laufenden SSH-Prozess starten und dessen Status einsammeln |
 | `close_ssh_connection` | SSH-Multiplexing-Verbindung schließen |
 | `check_commands_availability` | Prüft ob benötigte Tools lokal vorhanden sind |
 | `check_remote_commands_availability` | Prüft ob benötigte Tools remote vorhanden sind |
@@ -285,6 +284,6 @@ Modus `n` braucht **kein** `gzip` auf der Gegenseite, Modus `c` schon
 | `backup_mode` | Backup in Teil-Dateien inkl. Metadaten (lokal und remote, optional komprimiert) |
 | `setup_remote_listener` | Startet je Teil einen `nc`-Empfänger auf dem Remote-Host |
 | `remote_compression_active` | Wahr, wenn [De]Kompression auf der Remote-Seite läuft (`-r c` + `-c`) |
-| `wait_for_remote_listeners` | Wartet, bis die Remote-Empfänger (inkl. `gzip`) fertig geschrieben haben |
+| `wait_for_jobs` | Wartet auf lokale Teil-Jobs und die zugehörigen SSH-Prozesse |
 | `append_metadata` | Schreibt eine Zeile in die Metadatendatei (lokal oder remote) |
 | `register_job` / `wait_for_jobs` | Sammeln der Exit-Codes aller parallelen Teil-Jobs |

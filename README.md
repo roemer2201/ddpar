@@ -19,8 +19,8 @@ unterstützt: Ein nicht gleichmäßig verteilbarer Rest wird vom letzten Teil
 - Bash, GNU coreutils (`dd` mit `count_bytes`/`skip_bytes`/`seek_bytes`), `file`, `blockdev`
 - `gzip` (bei Kompression), `sha256sum` (bei Checksummen)
 - Für Remote-Betrieb: `ssh`, `nc` (netcat-openbsd), `ss`; optional `sshpass` für Passwort-Login.
-  Auf dem Remote-Host zusätzlich `gzip` bei `-r c` (bei `-r n` **nicht** nötig) und
-  `pgrep` (procps), damit auf den Abschluss der Empfänger gewartet werden kann
+  Auf dem Remote-Host zusätzlich Bash für die Fehlerweitergabe der Pipelines und
+  `gzip` bei `-r c` (bei `-r n` **nicht** nötig)
 
 ## Schnellstart
 

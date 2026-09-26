@@ -23,7 +23,8 @@ die gleichzeitig über separate `dd`-Prozesse verarbeitet werden.
 - **Shell:** Bash (`#!/bin/bash`), keine POSIX-only-Syntax erforderlich
 - **Linter:** ShellCheck (siehe `.shellcheckrc`). Vor jedem Commit ausführen: `make lint`
 - **Variablen:** Immer in doppelten Anführungszeichen, wenn sie Pfade enthalten können
-- **`eval`:** Immer `eval "${VAR}"` mit Quotes — nie `eval $VAR`
+- **Shell-Befehle:** Lokale Argumente als Array übergeben; dynamische Remote-Pfade
+  vor dem Einbetten in einen SSH-Befehl als einzelne Shell-Argumente quotieren
 - **Tests:** `[ -z "$VAR" ]` mit Quotes — nie `[ -z $VAR ]`
 - **grep in Metadaten:** Immer mit `^`-Anker, z.B. `grep "^KEY="`, um Prefix-Matches zu vermeiden
 - **Farb-Echo:** Immer `echo -e` wenn ANSI-Codes (`${INFOCOLOR}` etc.) ausgegeben werden
@@ -63,7 +64,7 @@ Manuelle Tests: siehe `TESTING.md`.
 - Remote Checks (`ddpar-check.sh -r`) vergleichen nur SHA256-Hashes je Segment (lokal vs. per SSH) — kein netcat-Datentransfer nötig
 - `RANDOM` in Bash liefert nur 0–32767 → Remote-Ports werden aus dem Bereich 10000–42767 gewählt
 - `fallocate` funktioniert nicht auf Block-Devices (wird korrekt übersprungen)
-- Nach dem Ende der lokalen Sender kann die Gegenseite noch schreiben (im Modus `c` puffert dort gzip); `wait_for_remote_listeners()` wartet per `pgrep -f "nc -N -l [P]ORT"` auf den Abschluss — die Zeichenklasse verhindert, dass die per SSH gestartete Shell sich selbst matcht
+- Nach dem Ende der lokalen Sender kann die Gegenseite noch schreiben (im Modus `c` puffert dort gzip); die lokale SSH-Sitzung bleibt bis zum Ende der Remote-Pipeline verbunden, und `wait_for_jobs()` prüft ihren Exit-Status (Bash `pipefail` auf der Gegenseite)
 - Beliebige Eingabegrößen: `SPLIT_SIZE` wird auf die Blockgröße abgerundet, der letzte Teil überträgt den Rest (`part_bytes`, dd-Flags `count_bytes`/`skip_bytes`/`seek_bytes`)
 - Von den Remote-Modus-Flags (`-r l/n/c`) sind `n` und `c` implementiert, `l` nicht
 

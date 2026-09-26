@@ -34,7 +34,8 @@ sodass `make test` auch ohne root/SSH grün bleibt.
 - `roundtrip.bats` – End-to-End auf Datei-Basis (kein sudo nötig):
   `backup` → `check` → `restore`, Vergleich Original vs. Wiederhergestellt,
   jeweils komprimiert und unkomprimiert, plus eine Negativ-Probe (manipuliertes
-  Backup wird von `check` als `FAILED` erkannt).
+  Backup wird von `check` als `FAILED` erkannt). Weitere Negativfälle prüfen
+  verkürzte Teile, verweigerte Clones und falsche Erfolgsmeldungen beim Check.
 - `blockdev.bats` – **Blockgeräte** über Loop-Devices (`losetup`, benötigt root):
   lokaler Clone Gerät→Gerät, Backup→Restore Gerät und `check` gegen die Quelle.
   Ohne root werden die Tests übersprungen.
@@ -48,7 +49,8 @@ sodass `make test` auch ohne root/SSH grün bleibt.
   `-c` ohne `-r c` im Clone-Modus und die Interoperabilität der Modi (mit
   `-r c` erzeugtes Backup, Restore mit `-r n`). Ohne passwortlose
   SSH-Verbindung werden die Tests übersprungen, ohne `gzip` auf dem Testhost
-  nur die `-r c`-Tests.
+  nur die `-r c`-Tests. Weitere Fälle decken Remote-Schreibfehler und Pfade mit
+  Apostroph beziehungsweise wörtlicher Command Substitution ab.
 - `helpers.bash` – gemeinsames `setup`/`teardown` (isoliertes Temp-Verzeichnis,
   automatisches Lösen von Loop-Devices/SSH-Socket) sowie `make_testfile`,
   `loop_setup`, `require_block_support`, `require_remote_support`,
