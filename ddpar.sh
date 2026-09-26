@@ -1,4 +1,8 @@
 #!/bin/bash
+#
+# Clone or back up files and block devices in parallel segments.
+# Flow: validate options and endpoints; calculate segments; run local or remote
+# workers; collect every worker's result before reporting success.
 
 # Fehler in dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
 # sonst zählt nur der letzte Befehl (z.B. ein erfolgreiches dd of=...).
@@ -144,6 +148,12 @@ function option_analysis {
     esac
   done
 
+  if ! [[ "${NUM_JOBS}" =~ ^[1-9][0-9]*$ ]] ||
+     ! [[ "${BLOCKSIZEBYTES}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Fehler: -j und -b müssen positive ganze Zahlen sein." >&2
+    exit 2
+  fi
+
   # Überprüfung der erforderlichen Parameter
   if [ -z "${INPUT}" ] || [ -z "${OUTPUT}" ] ; then
     echo -e "${ERRORCOLOR}Fehlende Parameter. Bitte geben Sie alle erforderlichen Parameter --input und --output an.${NOCOLOR}"
@@ -264,25 +274,22 @@ function is_ssh_socket_alive {
     return $?
 }
 
+# Quote one argument for the remote login shell, without interpreting its data.
+function shell_quote {
+	local escaped="${1//\'/\'\\\'\'}"
+	printf "'%s'" "${escaped}"
+}
+
+# Run a command locally as an argv array or remotely with quoted arguments.
 function execute_command {
-	# This function should preceed every command that could be executed remotely
-	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-	local command=$1
-	
-	if [ -z "${command}" ]; then
-		echo -e "${ERRORCOLOR}Fehler: Kein Befehl zum Ausführen angegeben.${NOCOLOR}"
-		return 1
-	fi
-	if [ $REMOTE -eq 1 ]; then
-		# Führe den Befehl auf dem Remote-System aus (via SSH)
-		ssh -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "${command}"
+	local command="" arg
+	if [ "${REMOTE}" -eq 1 ]; then
+		for arg in "$@"; do
+			command+="$(shell_quote "${arg}") "
+		done
+		execute_remote_command "${command}"
 	else
-		# Führe den Befehl lokal aus. eval (statt ${command}) entfernt die
-		# in den Befehlsstrings enthaltenen Quotes korrekt, analog zur
-		# Remote-Seite, wo die SSH-Shell den String neu parst. Ohne eval
-		# erhielte z.B. "file -b \"${OUTPUT}\"" die Quotes literal, wodurch
-		# die Typ-Erkennung eines lokalen Blockgeräts fehlschlägt.
-		eval "${command}"
+		"$@"
 	fi
 }
 
@@ -309,9 +316,54 @@ function execute_remote_background_command {
         return 1
     fi
 
-    # Background the remote process using "nohup ... &"?
-    [ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}ssh -S \"${SSH_SOCKET_PATH}\" \"${REMOTE_HOST}\" \"nohup sh -c \${command}\"> /tmp/ddpar.log 2>&1 &${NOCOLOR}"
-    ssh -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "nohup sh -c \"${command}\" > /tmp/ddpar.log 2>&1 &"
+    # Die Pipeline laeuft von SSH abgekoppelt (nohup), damit jeder Teil-Job nur
+    # kurze SSH-Sitzungen braucht: dauerhaft offene Sitzungen wuerden bei vielen
+    # Jobs das sshd-Limit MaxSessions (Standard 10) des ControlMasters reissen.
+    # Ein Wrapper legt PID und Exit-Status (Bash pipefail, deckt auch nc ab) im
+    # Statusverzeichnis ab; wait_for_jobs() fragt sie spaeter ab.
+    ensure_remote_status_dir || return 1
+    REMOTE_JOB_BASE="${REMOTE_STATUS_DIR}/job${#REMOTE_JOB_BASES[@]}-${CURRENT_REMOTE_PORT}"
+    execute_remote_command "nohup bash -c $(shell_quote "${REMOTE_JOB_WRAPPER}") ddpar-job $(shell_quote "${command}") $(shell_quote "${REMOTE_JOB_BASE}") < /dev/null > $(shell_quote "${REMOTE_JOB_BASE}.log") 2>&1 &"
+}
+
+# Wrapper fuer Remote-Pipelines: $1 = Pipeline, $2 = Basisname der Statusdateien.
+# Der Exit-Status wird atomar (tmp + mv) geschrieben.
+# shellcheck disable=SC2016 # wird erst auf dem Remote-Host ausgewertet
+REMOTE_JOB_WRAPPER='echo "$$" > "$2.pid"; bash -o pipefail -c "$1"; rc=$?; echo "${rc}" > "$2.tmp" && mv -f "$2.tmp" "$2.rc"'
+REMOTE_STATUS_DIR=""
+
+# Legt einmal pro Lauf ein privates Statusverzeichnis auf dem Remote-Host an.
+function ensure_remote_status_dir {
+	[ -n "${REMOTE_STATUS_DIR}" ] && return 0
+	REMOTE_STATUS_DIR=$(execute_remote_command "mktemp -d /tmp/ddpar-status.XXXXXX") || REMOTE_STATUS_DIR=""
+	if [ -z "${REMOTE_STATUS_DIR}" ]; then
+		echo -e "${ERRORCOLOR}Fehler: Statusverzeichnis auf ${REMOTE_HOST} konnte nicht angelegt werden.${NOCOLOR}" >&2
+		return 1
+	fi
+}
+
+# Gibt "rc <n>", "running" oder "missing" fuer einen Remote-Job aus. Der zweite
+# rc-Test faengt einen Job ab, der zwischen den ersten beiden Tests endet.
+function remote_job_state {
+	local q
+	q=$(shell_quote "$1")
+	execute_remote_command "if [ -f ${q}.rc ]; then echo rc \$(cat ${q}.rc); elif [ -f ${q}.pid ] && kill -0 \$(cat ${q}.pid) 2>/dev/null; then echo running; elif [ -f ${q}.rc ]; then echo rc \$(cat ${q}.rc); else echo missing; fi"
+}
+
+# Beendet die nc-Prozesse auf den uebergebenen Remote-Ports. Der Anker ^...$
+# trifft nur nc selbst, nicht die Wrapper-Shells, damit diese noch den
+# Exit-Status ablegen koennen.
+function stop_remote_listeners {
+	local port
+	for port in "$@"; do
+		execute_remote_command "pkill -f '^nc -N -l ${port}\$'" > /dev/null 2>&1
+	done
+}
+
+function remove_remote_status_dir {
+	[ -z "${REMOTE_STATUS_DIR}" ] && return 0
+	execute_remote_command "rm -rf -- $(shell_quote "${REMOTE_STATUS_DIR}")" > /dev/null 2>&1
+	REMOTE_STATUS_DIR=""
 }
 
 function close_ssh_connection {
@@ -324,7 +376,7 @@ function close_ssh_connection {
 
 function check_remote_commands_availability {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion check_remote_commands_availability aufgerufen${NOCOLOR}" >&2
-    local commands=("dd" "nc" "df" "tee" "blockdev" "stat" "ss")  # Liste der zu überprüfenden Befehle
+    local commands=("bash" "dd" "nc" "df" "tee" "blockdev" "stat" "ss")
 
     # Im Modus "n" wird gzip bewusst NICHT verlangt: dort wird lokal komprimiert
     # (local compression), die Remote-Seite schreibt den fertigen gzip-Strom
@@ -398,10 +450,13 @@ function check_output_access {
 	# über execute_command auf dem Remote-Host.
 	local parent
 	parent=$(dirname "${OUTPUT}")
-	if ! execute_command "{ [ -e \"${OUTPUT}\" ] && [ -w \"${OUTPUT}\" ]; } || { [ ! -e \"${OUTPUT}\" ] && [ -w \"${parent}\" ]; }"; then
-		echo -e "${ERRORCOLOR}Fehler: Keine Schreibrechte auf ${OUTPUT} (bzw. ${parent}).${NOCOLOR}"
-		exit 1
+	if execute_command test -e "${OUTPUT}"; then
+		if execute_command test -w "${OUTPUT}"; then return 0; fi
+	elif execute_command test -w "${parent}"; then
+		return 0
 	fi
+	echo -e "${ERRORCOLOR}Fehler: Keine Schreibrechte auf ${OUTPUT} (bzw. ${parent}).${NOCOLOR}" >&2
+	exit 1
 }
 
 function input_analysis {
@@ -426,15 +481,15 @@ function output_analysis {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
 	# Determine the type of the output file
 	echo -e "${INFOCOLOR}Analysiere OUTPUT${NOCOLOR}"
-	OUTPUT_FILE_TYPE=$(execute_command "file -b \"${OUTPUT}\"")
+	OUTPUT_FILE_TYPE=$(execute_command file -b -- "${OUTPUT}")
 
 	# Use the appropriate command to calculate the size of the output file
 	echo "\$OUTPUT_FILE_TYPE: ${OUTPUT_FILE_TYPE}"
 	if [[ "${OUTPUT_FILE_TYPE}" == "block special"* ]]; then
-		OUTPUT_SIZE=$(execute_command "blockdev --getsize64 \"${OUTPUT}\"")
+		OUTPUT_SIZE=$(execute_command blockdev --getsize64 "${OUTPUT}")
 		echo "\$OUTPUT_SIZE = $OUTPUT_SIZE"
 	else
-		OUTPUT_SIZE=$(execute_command "stat -c %s \"${OUTPUT}\"")
+		OUTPUT_SIZE=$(execute_command stat -c %s -- "${OUTPUT}")
 		echo "\$OUTPUT_SIZE = $OUTPUT_SIZE"
 	fi
 	echo -e "${INFOCOLOR}${FUNCNAME[0]} abgeschlossen${NOCOLOR}"
@@ -504,7 +559,7 @@ function clone_file {
         OUTPUT_PATH="${OUTPUT}/${INPUT_FILE_NAME}"
     elif [[ "${OUTPUT_FILE_TYPE}" == *"No such file or directory"* ]]; then
         if [ ! -z "$FORCE" ]; then
-            if execute_command "mkdir -p \"${OUTPUT}\""; then
+			if execute_command mkdir -p -- "${OUTPUT}"; then
                 OUTPUT_PATH="${OUTPUT}"
                 echo "Directory ${OUTPUT} created successfully."
             else
@@ -515,7 +570,7 @@ function clone_file {
             echo -e "${REQUESTCOLOR}${OUTPUT} does not exist, should this directory be created? (y/N)${NOCOLOR}"
             read answer
             if [ "$answer" == "y" ]; then
-                if execute_command "mkdir -p \"${OUTPUT}\""; then
+				if execute_command mkdir -p -- "${OUTPUT}"; then
                     OUTPUT_PATH="${OUTPUT}"
                     echo -e "${SUCCESSCOLOR}Directory ${OUTPUT} created successfully.${NOCOLOR}"
                 else
@@ -578,6 +633,18 @@ function run_clone_parts {
 	if [ "$COMPRESSION" -eq 1 ] && ! remote_compression_active; then
 		echo -e "${WARNCOLOR}[WARN] Kompression (-c) ist im Clone-Modus nur mit Remote-Modus 'c' (-r c) möglich und wird ignoriert. Ein Clone muss auf der Gegenseite wieder dekomprimiert werden; lokal steht sie im Backup-Modus (-m backup) zur Verfügung.${NOCOLOR}"
 	fi
+	# conv=notrunc is needed for parallel writes, but an existing regular file
+	# must lose any old suffix before the workers write their segments.
+	if [ "${REMOTE}" -ne 1 ] && [ "${INPUT}" -ef "${output_target}" ]; then
+		echo "Fehler: Quelle und Ziel sind dieselbe Datei." >&2
+		return 1
+	fi
+	if execute_command test -f "${output_target}"; then
+		if ! execute_command truncate -s "${INPUT_SIZE}" -- "${output_target}"; then
+			echo "Fehler: Zieldatei ${output_target} konnte nicht angepasst werden." >&2
+			return 1
+		fi
+	fi
 
 	for ((PART_NUM=0; PART_NUM<NUM_JOBS; PART_NUM++)); do
 		START=$((PART_NUM * SPLIT_SIZE))
@@ -593,7 +660,7 @@ function run_clone_parts {
 			# Netz geht nur der komprimierte Strom, die Gegenseite dekomprimiert
 			# ihn vor dem Schreiben (remote decompression). Nur so lässt sich ein
 			# Clone komprimiert übertragen — das Ziel muss die Rohdaten enthalten.
-			if ! setup_remote_listener "gzip -dc | dd of=\"${output_target}\" bs=${BLOCKSIZEBYTES} oflag=seek_bytes seek=${START} conv=notrunc"; then
+			if ! setup_remote_listener "gzip -dc | dd of=$(shell_quote "${output_target}") bs=${BLOCKSIZEBYTES} oflag=seek_bytes seek=${START} conv=notrunc"; then
 				echo -e "${ERRORCOLOR}Remote-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				return 1
 			fi
@@ -602,7 +669,7 @@ function run_clone_parts {
 		elif [ $REMOTE -eq 1 ]; then
 			# Die Empfängerseite läuft auf dem Remote-Host und wird als String
 			# über SSH gestartet; der Pfad ist dort in Anführungszeichen gesetzt.
-			if ! setup_remote_listener "dd of=\"${output_target}\" bs=${BLOCKSIZEBYTES} oflag=seek_bytes seek=${START} conv=notrunc"; then
+			if ! setup_remote_listener "dd of=$(shell_quote "${output_target}") bs=${BLOCKSIZEBYTES} oflag=seek_bytes seek=${START} conv=notrunc"; then
 				echo -e "${ERRORCOLOR}Remote-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				return 1
 			fi
@@ -621,7 +688,7 @@ function append_metadata {
 	# Schreibt eine Zeile in das Metadatenfile, lokal oder remote
 	local line=$1
 	if [ $REMOTE -eq 1 ]; then
-		execute_remote_command "echo \"${line}\" >> \"${METADATA_FILE}\""
+		execute_remote_command "printf '%s\\n' $(shell_quote "${line}") >> $(shell_quote "${METADATA_FILE}")"
 	else
 		echo "${line}" >> "${METADATA_FILE}"
 	fi
@@ -652,8 +719,12 @@ function setup_remote_listener {
 	done
 
 	echo -e "${INFOCOLOR}REMOTE COMMAND: nc -N -l ${CURRENT_REMOTE_PORT} | ${remote_output_cmd}${NOCOLOR}"
-	execute_remote_background_command "nc -N -l ${CURRENT_REMOTE_PORT} | ${remote_output_cmd}"
+	if ! execute_remote_background_command "nc -N -l ${CURRENT_REMOTE_PORT} | ${remote_output_cmd}"; then
+		INTERNAL_EXITCODE=2
+		return 1
+	fi
 	REMOTE_LISTENER_PORTS+=("${CURRENT_REMOTE_PORT}")
+	register_remote_job "${REMOTE_JOB_BASE}" "Remote-Empfänger Port ${CURRENT_REMOTE_PORT}"
 
 	# Check if execute_remote_background_command is running
 	MAX_ATTEMPTS=3 # Anzahl der maximalen Versuche
@@ -714,33 +785,38 @@ function backup_mode {
 
 	# Write metadata file (lokal oder remote)
 	if [ $REMOTE -eq 1 ]; then
-		if execute_remote_command "[ -f \"${METADATA_FILE}\" ]"; then
+		if execute_remote_command "test -f $(shell_quote "${METADATA_FILE}")"; then
 			echo "Metadatafile already exists, copying it to ${METADATA_FILE}.old"
-			execute_remote_command "cp -p \"${METADATA_FILE}\" \"${METADATA_FILE}.old\" && cat /dev/null > \"${METADATA_FILE}\""
+			if ! execute_remote_command "cp -p -- $(shell_quote "${METADATA_FILE}") $(shell_quote "${METADATA_FILE}.old") && : > $(shell_quote "${METADATA_FILE}")"; then
+				INTERNAL_EXITCODE=1
+				return 1
+			fi
 		fi
 	else
-		if [ -f ${METADATA_FILE} ]; then
+		if [ -f "${METADATA_FILE}" ]; then
 			echo "Metadatafile already exists, copying it to ${METADATA_FILE}.old"
-			cp -p ${METADATA_FILE} ${METADATA_FILE}.old
-			cat /dev/null > ${METADATA_FILE}
+			if ! cp -p -- "${METADATA_FILE}" "${METADATA_FILE}.old" || ! : > "${METADATA_FILE}"; then
+				INTERNAL_EXITCODE=1
+				return 1
+			fi
 		fi
 	fi
 
-	append_metadata "NUM_JOBS=${NUM_JOBS}"
+	append_metadata "NUM_JOBS=${NUM_JOBS}" || return 1
 	# FILE_NAME = Basisname der Backup-Dateien (bei -n abweichend von INPUT_FILE_NAME)
-	append_metadata "FILE_NAME=${OUTPUT_FILE_NAME}"
-	append_metadata "BLOCKSIZEBYTES=${BLOCKSIZEBYTES}"
-	append_metadata "INPUT_SIZE=${INPUT_SIZE}"
-	append_metadata "INPUT_FILE_NAME=${INPUT_FILE_NAME}"
-	append_metadata "FILE_TYPE=${INPUT_FILE_TYPE}"
-	append_metadata "SPLIT_SIZE=${SPLIT_SIZE}"
+	append_metadata "FILE_NAME=${OUTPUT_FILE_NAME}" || return 1
+	append_metadata "BLOCKSIZEBYTES=${BLOCKSIZEBYTES}" || return 1
+	append_metadata "INPUT_SIZE=${INPUT_SIZE}" || return 1
+	append_metadata "INPUT_FILE_NAME=${INPUT_FILE_NAME}" || return 1
+	append_metadata "FILE_TYPE=${INPUT_FILE_TYPE}" || return 1
+	append_metadata "SPLIT_SIZE=${SPLIT_SIZE}" || return 1
 
 	# Auch im Remote-Modus wird komprimiert (je nach -r lokal oder auf der
 	# Gegenseite, siehe unten). Die erzeugten .gz-Teile sind identisch, daher
 	# gehören die Kompressions-Metadaten in allen Fällen in die Metadatendatei.
 	if [ "$COMPRESSION" -eq 1 ]; then
-		append_metadata "COMPRESSION=${COMPRESSION}"
-		append_metadata "COMPRESSION_LEVEL=${COMPRESSION_LEVEL}"
+		append_metadata "COMPRESSION=${COMPRESSION}" || return 1
+		append_metadata "COMPRESSION_LEVEL=${COMPRESSION_LEVEL}" || return 1
 	fi
 
 	if [ "$REMOTE" -eq 1 ] && [ "$CHECKSUM" -eq 1 ]; then
@@ -766,7 +842,7 @@ function backup_mode {
 			# über das Netz gehen die Rohdaten, gzip läuft auf dem REMOTE-Host
 			# und schreibt dort direkt die .gz-Datei. Das entlastet die lokale
 			# CPU, spart aber keine Bandbreite (dafür siehe -r n).
-			if ! setup_remote_listener "gzip -${COMPRESSION_LEVEL} > \"${PART_BASE}.gz\""; then
+			if ! setup_remote_listener "gzip -${COMPRESSION_LEVEL} > $(shell_quote "${PART_BASE}.gz")"; then
 				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				break
 			fi
@@ -777,7 +853,7 @@ function backup_mode {
 			# DIESER Maschine, über das Netz geht nur der komprimierte Strom.
 			# Die Remote-Seite schreibt ihn unverändert in die .gz-Datei und
 			# benötigt dafür kein gzip.
-			if ! setup_remote_listener "dd of=\"${PART_BASE}.gz\" bs=${BLOCKSIZEBYTES}"; then
+			if ! setup_remote_listener "dd of=$(shell_quote "${PART_BASE}.gz") bs=${BLOCKSIZEBYTES}"; then
 				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				break
 			fi
@@ -786,7 +862,7 @@ function backup_mode {
 		elif [ $REMOTE -eq 1 ]; then
 			# Remote netcat backup, unkomprimiert, ohne Checksumme. Die
 			# Empfängerseite läuft auf dem Remote-Host (String via SSH).
-			if ! setup_remote_listener "dd of=\"${PART_BASE}.part\" bs=${BLOCKSIZEBYTES}"; then
+			if ! setup_remote_listener "dd of=$(shell_quote "${PART_BASE}.part") bs=${BLOCKSIZEBYTES}"; then
 				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				break
 			fi
@@ -815,12 +891,20 @@ function backup_mode {
 # würde Fehler einzelner dd-/nc-Pipelines verschlucken.
 JOB_PIDS=()
 JOB_LABELS=()
+# Remote-Pipelines: Basisname ihrer Statusdateien im REMOTE_STATUS_DIR
+REMOTE_JOB_BASES=()
+REMOTE_JOB_LABELS=()
 # Ports, auf denen remote nc-Listener gestartet wurden (für Cleanup bei Abbruch)
 REMOTE_LISTENER_PORTS=()
 
 function register_job {
 	JOB_PIDS+=("$1")
 	JOB_LABELS+=("$2")
+}
+
+function register_remote_job {
+	REMOTE_JOB_BASES+=("${1}")
+	REMOTE_JOB_LABELS+=("${2}")
 }
 
 function wait_for_jobs {
@@ -835,6 +919,46 @@ function wait_for_jobs {
 			failed=$((failed + 1))
 		fi
 	done
+	if [ "${#JOB_PIDS[@]}" -eq 0 ]; then
+		echo "Fehler: Es wurde kein Clone- oder Backup-Job gestartet." >&2
+		failed=$((failed + 1))
+	fi
+	# Nach einem Fehler (lokaler Job oder nicht gestarteter Teil) wartet ein
+	# Remote-Listener eventuell ewig auf seinen Sender -> nc dort beenden.
+	if [ "${failed}" -gt 0 ] || [ "${INTERNAL_EXITCODE}" -ne 0 ]; then
+		stop_remote_listeners "${REMOTE_LISTENER_PORTS[@]}"
+	fi
+	[ "${#REMOTE_JOB_BASES[@]}" -gt 0 ] && echo -e "${INFOCOLOR}Warte auf den Abschluss der Remote-Pipelines ...${NOCOLOR}"
+	local state polls
+	for i in "${!REMOTE_JOB_BASES[@]}"; do
+		# Die Gegenseite kann nach dem Ende des lokalen Senders noch schreiben
+		# (gzip im Modus c, Flush beim Schliessen eines Blockgeraets). Kein festes
+		# Zeitlimit, damit ein langsamer, aber gesunder Schreibvorgang nicht als
+		# Fehler zaehlt; ist der Status nicht abrufbar, gilt der Job als fehlgeschlagen.
+		polls=0
+		while true; do
+			state=$(remote_job_state "${REMOTE_JOB_BASES[$i]}") || state="unreachable"
+			[ "${state}" != "running" ] && break
+			polls=$((polls + 1))
+			[ $((polls % 120)) -eq 0 ] && echo -e "${INFOCOLOR}${REMOTE_JOB_LABELS[$i]} schreibt noch ...${NOCOLOR}"
+			sleep 0.5
+		done
+		case "${state}" in
+			"rc 0") ;;
+			"rc "*)
+				echo -e "${ERRORCOLOR}Fehler: ${REMOTE_JOB_LABELS[$i]} ist mit Exit-Code ${state#rc } fehlgeschlagen.${NOCOLOR}" >&2
+				execute_remote_command "tail -n 5 -- $(shell_quote "${REMOTE_JOB_BASES[$i]}.log")" >&2 2>/dev/null
+				failed=$((failed + 1))
+				;;
+			*)
+				echo -e "${ERRORCOLOR}Fehler: Exit-Status von ${REMOTE_JOB_LABELS[$i]} ist nicht ermittelbar (${state}).${NOCOLOR}" >&2
+				failed=$((failed + 1))
+				;;
+		esac
+	done
+	remove_remote_status_dir
+	REMOTE_JOB_BASES=()
+	REMOTE_JOB_LABELS=()
 	JOB_PIDS=()
 	JOB_LABELS=()
 	if [ $failed -gt 0 ]; then
@@ -846,42 +970,10 @@ function wait_for_jobs {
 	return 0
 }
 
-function wait_for_remote_listeners {
-	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-	# Wenn die lokalen Sender fertig sind, schreibt die Gegenseite unter Umständen
-	# noch: im Modus "c" muss dort erst gzip den Rest der Pipe verarbeiten, bevor
-	# die .gz-Datei vollständig ist. Ohne dieses Warten könnte ein direkt
-	# anschließender ddpar-check.sh eine noch unfertige Datei lesen.
-	#
-	# Erkannt wird der sh -c-Elternprozess des Listeners, der bis zum Ende der
-	# gesamten Pipeline lebt. Im Suchmuster wird die erste Ziffer des Ports in
-	# eine Zeichenklasse gesetzt ("[3]0861"), damit die per SSH gestartete Shell,
-	# die das Muster selbst in ihrer Kommandozeile trägt, nicht mitgezählt wird.
-	# Fehlt pgrep auf der Gegenseite, endet die Prüfung sofort (Exit-Code != 0)
-	# und es bleibt beim bisherigen Verhalten.
-	local port pattern attempt
-	local max_attempts=120  # 120 x 0,5 s = 60 s je Teil
-
-	[ "${#REMOTE_LISTENER_PORTS[@]}" -eq 0 ] && return 0
-	echo -e "${INFOCOLOR}Warte auf den Abschluss der Remote-Empfänger ...${NOCOLOR}"
-	for port in "${REMOTE_LISTENER_PORTS[@]}"; do
-		pattern="nc -N -l [${port:0:1}]${port:1}"
-		attempt=0
-		while execute_remote_command "pgrep -f '${pattern}' > /dev/null 2>&1"; do
-			attempt=$((attempt + 1))
-			if [ "${attempt}" -ge "${max_attempts}" ]; then
-				echo -e "${WARNCOLOR}Warnung: Der Remote-Empfänger auf Port ${port} läuft noch. Die Zieldatei ist möglicherweise noch nicht vollständig.${NOCOLOR}"
-				break
-			fi
-			sleep 0.5
-		done
-	done
-}
-
 function cleanup_on_signal {
 	trap - INT TERM
 	echo -e "${WARNCOLOR}Abbruch: Beende laufende Teil-Prozesse ...${NOCOLOR}" >&2
-	local pids port
+	local pids
 	pids=$(jobs -p)
 	if [ -n "$pids" ]; then
 		# shellcheck disable=SC2086 # PIDs sind whitespace-getrennt gewollt
@@ -889,9 +981,8 @@ function cleanup_on_signal {
 		wait $pids 2>/dev/null
 	fi
 	if [ $REMOTE -eq 1 ] && is_ssh_socket_alive; then
-		for port in "${REMOTE_LISTENER_PORTS[@]}"; do
-			execute_remote_command "pkill -f 'nc -N -l ${port}'" 2>/dev/null
-		done
+		stop_remote_listeners "${REMOTE_LISTENER_PORTS[@]}"
+		remove_remote_status_dir
 		close_ssh_connection
 	fi
 	exit 130
@@ -935,7 +1026,7 @@ case $MODE in
         case ${INPUT_FILE_TYPE} in
             "block special"*)
                 echo "Do block special cloning"
-                clone_block
+                clone_block || INTERNAL_EXITCODE=1
                 ;;
             "directory")
                 echo -e "${ERRORCOLOR}Input-type is directory, which cannot be cloned using this script. Exiting ...${NOCOLOR}"
@@ -943,14 +1034,14 @@ case $MODE in
                 ;;
             *)
                 echo "Try cloning this file..."
-                clone_file
+                clone_file || INTERNAL_EXITCODE=1
                 ;;
         esac
         # Wait for all jobs to finish and collect their exit codes
         wait_for_jobs
         ;;
     "backup")
-        backup_mode
+        backup_mode || INTERNAL_EXITCODE=1
         # Wait for all jobs to finish and collect their exit codes
         wait_for_jobs
         ;;
@@ -961,7 +1052,6 @@ case $MODE in
 esac
 
 if [ $REMOTE -eq 1 ]; then
-	wait_for_remote_listeners
 	close_ssh_connection
 	if [ $? -eq 0 ]; then
 		echo -e "${SUCCESSCOLOR}SSH-Verbindung zu ${REMOTE_HOST} erfolgreich gertrennt.${NOCOLOR}"

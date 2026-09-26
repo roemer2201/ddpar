@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# Compare segmented backups or clones against their source or destination.
+# Flow: parse and validate inputs; hash each segment; report every job's status.
 
 # Fehler in dd-/sha256sum-Pipelines sollen den Exit-Code der Pipeline
 # bestimmen — so führt ein fehlgeschlagener Vergleich (sha256sum -c) zu
@@ -111,6 +114,12 @@ function execute_remote_command {
   return $?
 }
 
+# Quote a filename for the remote login shell before building a command.
+function shell_quote {
+  local escaped="${1//\'/\'\\\'\'}"
+  printf "'%s'" "${escaped}"
+}
+
 function close_ssh_connection {
   [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
   ssh -S "${SSH_SOCKET_PATH}" -O exit "${REMOTE_HOST}"
@@ -142,6 +151,10 @@ function wait_for_jobs {
       failed=$((failed + 1))
     fi
   done
+  if [ "${#JOB_PIDS[@]}" -eq 0 ]; then
+    echo "Fehler: Es wurden keine Segmente geprüft." >&2
+    failed=$((failed + 1))
+  fi
   JOB_PIDS=()
   JOB_LABELS=()
   if [ $failed -gt 0 ]; then
@@ -197,7 +210,7 @@ function remote_seg_hash {
   # $1 = Datei/Device (auf Remote-Host), $2 = Segment-Index. Liefert SHA256 des Segments.
   local f=$1 idx=$2
   local start=$((idx * SPLIT_SIZE))
-  execute_remote_command "dd if='$f' bs=$BLOCKSIZEBYTES iflag=count_bytes,skip_bytes count=$(part_bytes "$idx") skip=$start status=none | sha256sum" | cut -d' ' -f1
+  execute_remote_command "dd if=$(shell_quote "${f}") bs=$BLOCKSIZEBYTES iflag=count_bytes,skip_bytes count=$(part_bytes "$idx") skip=$start status=none | sha256sum" | cut -d' ' -f1
 }
 
 function remote_part_hash {
@@ -212,12 +225,12 @@ function remote_part_hash {
   local idx=$1
   if [ -n "$COMPRESSION" ]; then
     if [ "$REMOTE_MODE" = "c" ]; then
-      execute_remote_command "zcat '${BASE_FILES}${idx}.gz' | sha256sum" | cut -d' ' -f1
+      execute_remote_command "zcat $(shell_quote "${BASE_FILES}${idx}.gz") | sha256sum" | cut -d' ' -f1
     else
-      execute_remote_command "cat '${BASE_FILES}${idx}.gz'" | zcat | sha256sum | cut -d' ' -f1
+      execute_remote_command "cat -- $(shell_quote "${BASE_FILES}${idx}.gz")" | zcat | sha256sum | cut -d' ' -f1
     fi
   else
-    execute_remote_command "sha256sum '${BASE_FILES}${idx}.part'" | cut -d' ' -f1
+    execute_remote_command "sha256sum -- $(shell_quote "${BASE_FILES}${idx}.part")" | cut -d' ' -f1
   fi
 }
 
@@ -240,8 +253,8 @@ function check_restored_image {
     if [ $REMOTE -eq 1 ]; then
       # Backup-Teile liegen remote (.part), Ziel ist lokal
       (
-        h_bak=$(remote_part_hash "$i")
-        h_dst=$(local_seg_hash "$OUTPUT_FILE" "$i")
+        h_bak=$(remote_part_hash "$i") || exit 1
+        h_dst=$(local_seg_hash "$OUTPUT_FILE" "$i") || exit 1
         if [ "$h_bak" = "$h_dst" ]; then
           echo "Segment $i: OK ($h_bak)"
         else
@@ -264,8 +277,8 @@ function check_backuped_image {
     if [ $REMOTE -eq 1 ]; then
       # Quelle ist lokal, Backup-Teile liegen remote (.part)
       (
-        h_src=$(local_seg_hash "$INPUT_FILE" "$i")
-        h_bak=$(remote_part_hash "$i")
+        h_src=$(local_seg_hash "$INPUT_FILE" "$i") || exit 1
+        h_bak=$(remote_part_hash "$i") || exit 1
         if [ "$h_src" = "$h_bak" ]; then
           echo "Segment $i: OK ($h_src)"
         else
@@ -286,14 +299,28 @@ function check_cloned_image {
   # Vergleicht Quelle und Ziel eines Clones segmentweise und parallel.
   # Es existieren keine .sha256-Dateien, daher werden die Hashes beider
   # Seiten direkt berechnet und verglichen.
+  # The segment hashes stop at the source size, so reject extra bytes in a
+  # regular target file before comparing the segments.
+  if [[ "${OUTPUT_FILE_TYPE}" != "block special"* ]]; then
+    if [ "${REMOTE}" -eq 1 ]; then
+      target_size=$(execute_remote_command "stat -c %s -- $(shell_quote "${DESTINATION}")") || return 1
+    else
+      target_size=$(stat -c %s -- "${DESTINATION}") || return 1
+    fi
+    if [ "${target_size}" -ne "${INPUT_SIZE}" ]; then
+      echo "Fehler: Zieldatei hat ${target_size} Bytes, Quelle ${INPUT_SIZE} Bytes." >&2
+      INTERNAL_EXITCODE=1
+      return 1
+    fi
+  fi
   for ((i=0; i<NUM_JOBS; i++)); do
     (
-      HASH_SRC=$(local_seg_hash "$SOURCE" "$i")
+      HASH_SRC=$(local_seg_hash "$SOURCE" "$i") || exit 1
       if [ $REMOTE -eq 1 ]; then
         # Geklontes Ziel liegt auf dem Remote-Host
-        HASH_DST=$(remote_seg_hash "$DESTINATION" "$i")
+        HASH_DST=$(remote_seg_hash "$DESTINATION" "$i") || exit 1
       else
-        HASH_DST=$(local_seg_hash "$DESTINATION" "$i")
+        HASH_DST=$(local_seg_hash "$DESTINATION" "$i") || exit 1
       fi
       if [ "$HASH_SRC" = "$HASH_DST" ]; then
         echo "Segment $i: OK ($HASH_SRC)"
@@ -399,7 +426,8 @@ fi
 
 # Check if all three variables are set
 if [ -n "$SOURCE" ] && [ -n "$BASE_PATH" ] && [ -n "$DESTINATION" ]; then
-  echo "All three variables are set. The loop will not be executed."
+  echo "Fehler: Genau zwei von -s, -b und -d sind erforderlich." >&2
+  exit 2
 fi
 
 # Create spinoff variables
@@ -410,7 +438,7 @@ if [ ! -z "${BASE_PATH}" ]; then
   # Get parameters from metadata file (lokal oder remote)
   if [ $REMOTE -eq 1 ]; then
     META_SRC=$(mktemp)
-    execute_remote_command "cat '$METADATA_FILE'" > "$META_SRC" 2>/dev/null
+    execute_remote_command "cat -- $(shell_quote "${METADATA_FILE}")" > "$META_SRC" 2>/dev/null
     if [ ! -s "$META_SRC" ]; then
       echo "Die Metadatendatei $METADATA_FILE auf $REMOTE_HOST existiert nicht oder ist leer."
       rm -f "$META_SRC"
@@ -431,7 +459,14 @@ if [ ! -z "${BASE_PATH}" ]; then
   BLOCKSIZEBYTES=$(grep "^BLOCKSIZEBYTES=" "$META_SRC" | cut -d "=" -f 2)
   COMPRESSION=$(grep "^COMPRESSION=" "$META_SRC" | cut -d "=" -f 2)
   # Ältere Metadatendateien ohne INPUT_SIZE: glatte Teilung annehmen
-  [ -z "$INPUT_SIZE" ] && INPUT_SIZE=$((SPLIT_SIZE * NUM_JOBS))
+  if [ -z "$INPUT_SIZE" ] && [[ "${SPLIT_SIZE}" =~ ^[1-9][0-9]*$ && "${NUM_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
+    INPUT_SIZE=$((SPLIT_SIZE * NUM_JOBS))
+  fi
+  if ! [[ "${NUM_JOBS}" =~ ^[1-9][0-9]*$ && "${BLOCKSIZEBYTES}" =~ ^[1-9][0-9]*$ &&
+          "${INPUT_SIZE}" =~ ^[0-9]+$ && "${SPLIT_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Fehler: Ungültige numerische Backup-Metadaten." >&2
+    exit 1
+  fi
   [ $REMOTE -eq 1 ] && rm -f "$META_SRC"
 
   # Komprimierte Remote-Backups werden im Modus "n" lokal ausgepackt (local
@@ -464,19 +499,19 @@ if [ ! -z "$SOURCE" ]; then
     exit 1
   fi
   INPUT_FILE=$SOURCE
-  INPUT_FILE_TYPE="$(file -b $SOURCE)"
+  INPUT_FILE_TYPE="$(file -b -- "${SOURCE}")"
 fi
 if [ ! -z "$DESTINATION" ]; then
   OUTPUT_FILE=$DESTINATION
   # Beim Remote-Clone-Check (kein BASE_PATH) liegt das Ziel remote -> file -b nicht lokal aufrufen
   if [ $REMOTE -eq 1 ] && [ -z "${BASE_PATH}" ]; then
-    OUTPUT_FILE_TYPE=$(execute_remote_command "file -b '$DESTINATION'")
+    OUTPUT_FILE_TYPE=$(execute_remote_command "file -b -- $(shell_quote "${DESTINATION}")")
   else
     if [ ! -r "$DESTINATION" ]; then
       echo "Fehler: Ziel $DESTINATION existiert nicht oder ist nicht lesbar."
       exit 1
     fi
-    OUTPUT_FILE_TYPE="$(file -b $DESTINATION)"
+    OUTPUT_FILE_TYPE="$(file -b -- "${DESTINATION}")"
   fi
 fi
 
@@ -495,28 +530,16 @@ fi
 if [ -n "$SOURCE" ] && [ -n "$BASE_PATH" ] && [ -z "$DESTINATION" ]; then
   echo "In the loop: Comparing Source $SOURCE with Base Path $BASE_PATH ..."
 
-  if [[ "${BASE_FILE_TYPE}" == "block special"* ]] && [[ "${INPUT_FILE_TYPE}" == "block special"* ]]; then
-    echo "Beginning to check ..."
-    check_backuped_image
-  fi
-  if [[ "${BASE_FILE_TYPE}" != "block special"* ]] && [[ "${INPUT_FILE_TYPE}" != "block special"* ]]; then
-    echo "Beginning to check ..."
-    check_backuped_image
-  fi
+  echo "Beginning to check ..."
+  check_backuped_image
 fi
 
 # Check if only $BASE_PATH and $DESTINATION are set
 if [ -z "$SOURCE" ] && [ -n "$BASE_PATH" ] && [ -n "$DESTINATION" ]; then
   echo "In the loop: Comparing Base Path $BASE_PATH with Destination $DESTINATION ..."
 
-  if [[ "${BASE_FILE_TYPE}" == "block special"* ]] && [[ "${OUTPUT_FILE_TYPE}" == "block special"* ]]; then
-    echo "Beginning to check ..."
-    check_restored_image
-  fi
-  if [[ "${BASE_FILE_TYPE}" != "block special"* ]] && [[ "${OUTPUT_FILE_TYPE}" != "block special"* ]]; then
-    echo "Beginning to check ..."
-    check_restored_image
-  fi
+  echo "Beginning to check ..."
+  check_restored_image
 
 fi
 
@@ -532,11 +555,15 @@ if [ -n "$SOURCE" ] && [ -z "$BASE_PATH" ] && [ -n "$DESTINATION" ]; then
   fi
   # Gleiche Aufteilung wie beim Clone-Vorgang (ddpar.sh size_calculation):
   # SPLIT_SIZE auf Blockgröße abgerundet, das letzte Segment prüft den Rest.
+  if ! [[ "${NUM_JOBS}" =~ ^[1-9][0-9]*$ && "${BLOCKSIZEBYTES}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Fehler: -j und -B müssen positive ganze Zahlen sein." >&2
+    exit 2
+  fi
   SPLIT_SIZE=$(( (INPUT_SIZE / (NUM_JOBS * BLOCKSIZEBYTES)) * BLOCKSIZEBYTES ))
   [ "$SPLIT_SIZE" -eq 0 ] && SPLIT_SIZE=$BLOCKSIZEBYTES
 
   echo "Beginning to check ..."
-  check_cloned_image
+  check_cloned_image || INTERNAL_EXITCODE=1
 fi
 
 

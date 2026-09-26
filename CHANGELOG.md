@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased] – Review-Korrekturen
+
+- Lokale Pfade werden ohne `eval` als Argumente übergeben; Remote-Pfade werden
+  für die Shell gequotet. Leerzeichen, Apostrophe und wörtliche `$()`-Ausdrücke
+  bleiben damit Dateinamen und werden nicht als Befehle ausgeführt.
+- Clone, Backup, Restore und Check melden Fehler, wenn keine Jobs gestartet
+  wurden. Die Parameter für Jobanzahl und Blockgröße werden validiert.
+- Vor dem Restore wird die Länge aller unkomprimierten Backup-Teile geprüft.
+  Beim erzwungenen Datei-Clone wird ein altes Dateiende entfernt; der Clone-Check
+  berücksichtigt die Gesamtgröße der Zieldatei.
+- Remote-Jobs melden den Exit-Status ihrer gesamten Pipeline (Bash `pipefail`)
+  über Statusdateien in einem privaten Verzeichnis `/tmp/ddpar-status.*` auf der
+  Gegenseite. Die Pipelines laufen per `nohup` abgekoppelt, damit auch bei mehr
+  als 10 Jobs das sshd-Limit `MaxSessions` des ControlMasters nicht erreicht
+  wird. Fehlgeschlagene Remote-Schreibvorgänge, fehlende Status und eine nicht
+  erreichbare Gegenseite beenden den Aufruf mit Fehlerstatus; ein festes
+  Zeitlimit gibt es nicht, damit langsames Nachschreiben kein Fehler ist.
+- Nach einem lokalen Fehler werden die zugehörigen Remote-Listener beendet,
+  statt verwaist auf ihren Partner zu warten.
+- `ddpar-restore.sh` akzeptiert wie `ddpar-check.sh` ältere Metadaten ohne
+  `INPUT_SIZE` (glatte Teilung).
+- Regressionstests für diese Fälle und für wiederholte Backups mit Leerzeichen
+  im Basisnamen ergänzt.
+
 ## [Unreleased] – branch claude/remote-netcat-decompression-fdxwqa (Remote netcat mit Remote-[De]Kompression)
 
 ### Hinzugefügt
