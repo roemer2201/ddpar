@@ -316,10 +316,54 @@ function execute_remote_background_command {
         return 1
     fi
 
-    # Keep SSH attached to the remote pipeline so its real exit status can be
-    # collected after the local sender finishes. Bash pipefail covers nc too.
-    ssh -n -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "bash -o pipefail -c $(shell_quote "${command}")" &
-    REMOTE_SSH_PID=$!
+    # Die Pipeline laeuft von SSH abgekoppelt (nohup), damit jeder Teil-Job nur
+    # kurze SSH-Sitzungen braucht: dauerhaft offene Sitzungen wuerden bei vielen
+    # Jobs das sshd-Limit MaxSessions (Standard 10) des ControlMasters reissen.
+    # Ein Wrapper legt PID und Exit-Status (Bash pipefail, deckt auch nc ab) im
+    # Statusverzeichnis ab; wait_for_jobs() fragt sie spaeter ab.
+    ensure_remote_status_dir || return 1
+    REMOTE_JOB_BASE="${REMOTE_STATUS_DIR}/job${#REMOTE_JOB_BASES[@]}-${CURRENT_REMOTE_PORT}"
+    execute_remote_command "nohup bash -c $(shell_quote "${REMOTE_JOB_WRAPPER}") ddpar-job $(shell_quote "${command}") $(shell_quote "${REMOTE_JOB_BASE}") < /dev/null > $(shell_quote "${REMOTE_JOB_BASE}.log") 2>&1 &"
+}
+
+# Wrapper fuer Remote-Pipelines: $1 = Pipeline, $2 = Basisname der Statusdateien.
+# Der Exit-Status wird atomar (tmp + mv) geschrieben.
+# shellcheck disable=SC2016 # wird erst auf dem Remote-Host ausgewertet
+REMOTE_JOB_WRAPPER='echo "$$" > "$2.pid"; bash -o pipefail -c "$1"; rc=$?; echo "${rc}" > "$2.tmp" && mv -f "$2.tmp" "$2.rc"'
+REMOTE_STATUS_DIR=""
+
+# Legt einmal pro Lauf ein privates Statusverzeichnis auf dem Remote-Host an.
+function ensure_remote_status_dir {
+	[ -n "${REMOTE_STATUS_DIR}" ] && return 0
+	REMOTE_STATUS_DIR=$(execute_remote_command "mktemp -d /tmp/ddpar-status.XXXXXX") || REMOTE_STATUS_DIR=""
+	if [ -z "${REMOTE_STATUS_DIR}" ]; then
+		echo -e "${ERRORCOLOR}Fehler: Statusverzeichnis auf ${REMOTE_HOST} konnte nicht angelegt werden.${NOCOLOR}" >&2
+		return 1
+	fi
+}
+
+# Gibt "rc <n>", "running" oder "missing" fuer einen Remote-Job aus. Der zweite
+# rc-Test faengt einen Job ab, der zwischen den ersten beiden Tests endet.
+function remote_job_state {
+	local q
+	q=$(shell_quote "$1")
+	execute_remote_command "if [ -f ${q}.rc ]; then echo rc \$(cat ${q}.rc); elif [ -f ${q}.pid ] && kill -0 \$(cat ${q}.pid) 2>/dev/null; then echo running; elif [ -f ${q}.rc ]; then echo rc \$(cat ${q}.rc); else echo missing; fi"
+}
+
+# Beendet die nc-Prozesse auf den uebergebenen Remote-Ports. Der Anker ^...$
+# trifft nur nc selbst, nicht die Wrapper-Shells, damit diese noch den
+# Exit-Status ablegen koennen.
+function stop_remote_listeners {
+	local port
+	for port in "$@"; do
+		execute_remote_command "pkill -f '^nc -N -l ${port}\$'" > /dev/null 2>&1
+	done
+}
+
+function remove_remote_status_dir {
+	[ -z "${REMOTE_STATUS_DIR}" ] && return 0
+	execute_remote_command "rm -rf -- $(shell_quote "${REMOTE_STATUS_DIR}")" > /dev/null 2>&1
+	REMOTE_STATUS_DIR=""
 }
 
 function close_ssh_connection {
@@ -675,8 +719,12 @@ function setup_remote_listener {
 	done
 
 	echo -e "${INFOCOLOR}REMOTE COMMAND: nc -N -l ${CURRENT_REMOTE_PORT} | ${remote_output_cmd}${NOCOLOR}"
-	execute_remote_background_command "nc -N -l ${CURRENT_REMOTE_PORT} | ${remote_output_cmd}"
+	if ! execute_remote_background_command "nc -N -l ${CURRENT_REMOTE_PORT} | ${remote_output_cmd}"; then
+		INTERNAL_EXITCODE=2
+		return 1
+	fi
 	REMOTE_LISTENER_PORTS+=("${CURRENT_REMOTE_PORT}")
+	register_remote_job "${REMOTE_JOB_BASE}" "Remote-Empfänger Port ${CURRENT_REMOTE_PORT}"
 
 	# Check if execute_remote_background_command is running
 	MAX_ATTEMPTS=3 # Anzahl der maximalen Versuche
@@ -702,11 +750,8 @@ function setup_remote_listener {
 	if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
 		echo -e "${INFOCOLOR}Process did not start on port ${CURRENT_REMOTE_PORT} after $MAX_ATTEMPTS attempts."
 		INTERNAL_EXITCODE=2
-		kill "${REMOTE_SSH_PID}" 2>/dev/null
-		wait "${REMOTE_SSH_PID}" 2>/dev/null
 		return 1
 	fi
-	register_remote_job "${REMOTE_SSH_PID}" "Remote-Empfänger Port ${CURRENT_REMOTE_PORT}"
 }
 
 function backup_mode {
@@ -846,7 +891,8 @@ function backup_mode {
 # würde Fehler einzelner dd-/nc-Pipelines verschlucken.
 JOB_PIDS=()
 JOB_LABELS=()
-REMOTE_JOB_PIDS=()
+# Remote-Pipelines: Basisname ihrer Statusdateien im REMOTE_STATUS_DIR
+REMOTE_JOB_BASES=()
 REMOTE_JOB_LABELS=()
 # Ports, auf denen remote nc-Listener gestartet wurden (für Cleanup bei Abbruch)
 REMOTE_LISTENER_PORTS=()
@@ -857,7 +903,7 @@ function register_job {
 }
 
 function register_remote_job {
-	REMOTE_JOB_PIDS+=("${1}")
+	REMOTE_JOB_BASES+=("${1}")
 	REMOTE_JOB_LABELS+=("${2}")
 }
 
@@ -877,34 +923,41 @@ function wait_for_jobs {
 		echo "Fehler: Es wurde kein Clone- oder Backup-Job gestartet." >&2
 		failed=$((failed + 1))
 	fi
-	# A local failure may leave a remote listener waiting forever for a client.
-	# Stop those sessions before waiting for their final exit statuses.
-	if [ "${failed}" -gt 0 ]; then
-		for i in "${!REMOTE_JOB_PIDS[@]}"; do
-			kill "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null || true
-		done
+	# Nach einem Fehler (lokaler Job oder nicht gestarteter Teil) wartet ein
+	# Remote-Listener eventuell ewig auf seinen Sender -> nc dort beenden.
+	if [ "${failed}" -gt 0 ] || [ "${INTERNAL_EXITCODE}" -ne 0 ]; then
+		stop_remote_listeners "${REMOTE_LISTENER_PORTS[@]}"
 	fi
-	for i in "${!REMOTE_JOB_PIDS[@]}"; do
-		# Remote compression may continue after nc has closed. A hung remote
-		# worker must make this operation fail rather than report success.
-		local attempts=0
-		while kill -0 "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null && [ "${attempts}" -lt 240 ]; do
+	[ "${#REMOTE_JOB_BASES[@]}" -gt 0 ] && echo -e "${INFOCOLOR}Warte auf den Abschluss der Remote-Pipelines ...${NOCOLOR}"
+	local state polls
+	for i in "${!REMOTE_JOB_BASES[@]}"; do
+		# Die Gegenseite kann nach dem Ende des lokalen Senders noch schreiben
+		# (gzip im Modus c, Flush beim Schliessen eines Blockgeraets). Kein festes
+		# Zeitlimit, damit ein langsamer, aber gesunder Schreibvorgang nicht als
+		# Fehler zaehlt; ist der Status nicht abrufbar, gilt der Job als fehlgeschlagen.
+		polls=0
+		while true; do
+			state=$(remote_job_state "${REMOTE_JOB_BASES[$i]}") || state="unreachable"
+			[ "${state}" != "running" ] && break
+			polls=$((polls + 1))
+			[ $((polls % 120)) -eq 0 ] && echo -e "${INFOCOLOR}${REMOTE_JOB_LABELS[$i]} schreibt noch ...${NOCOLOR}"
 			sleep 0.5
-			attempts=$((attempts + 1))
 		done
-		if kill -0 "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null; then
-			echo "Fehler: ${REMOTE_JOB_LABELS[$i]} hat das Zeitlimit überschritten." >&2
-			kill "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null || true
-			failed=$((failed + 1))
-		fi
-		wait "${REMOTE_JOB_PIDS[$i]}"
-		rc=$?
-		if [ "${rc}" -ne 0 ]; then
-			echo "Fehler: ${REMOTE_JOB_LABELS[$i]} ist mit Exit-Code ${rc} fehlgeschlagen." >&2
-			failed=$((failed + 1))
-		fi
+		case "${state}" in
+			"rc 0") ;;
+			"rc "*)
+				echo -e "${ERRORCOLOR}Fehler: ${REMOTE_JOB_LABELS[$i]} ist mit Exit-Code ${state#rc } fehlgeschlagen.${NOCOLOR}" >&2
+				execute_remote_command "tail -n 5 -- $(shell_quote "${REMOTE_JOB_BASES[$i]}.log")" >&2 2>/dev/null
+				failed=$((failed + 1))
+				;;
+			*)
+				echo -e "${ERRORCOLOR}Fehler: Exit-Status von ${REMOTE_JOB_LABELS[$i]} ist nicht ermittelbar (${state}).${NOCOLOR}" >&2
+				failed=$((failed + 1))
+				;;
+		esac
 	done
-	REMOTE_JOB_PIDS=()
+	remove_remote_status_dir
+	REMOTE_JOB_BASES=()
 	REMOTE_JOB_LABELS=()
 	JOB_PIDS=()
 	JOB_LABELS=()
@@ -920,7 +973,7 @@ function wait_for_jobs {
 function cleanup_on_signal {
 	trap - INT TERM
 	echo -e "${WARNCOLOR}Abbruch: Beende laufende Teil-Prozesse ...${NOCOLOR}" >&2
-	local pids port
+	local pids
 	pids=$(jobs -p)
 	if [ -n "$pids" ]; then
 		# shellcheck disable=SC2086 # PIDs sind whitespace-getrennt gewollt
@@ -928,9 +981,8 @@ function cleanup_on_signal {
 		wait $pids 2>/dev/null
 	fi
 	if [ $REMOTE -eq 1 ] && is_ssh_socket_alive; then
-		for port in "${REMOTE_LISTENER_PORTS[@]}"; do
-			execute_remote_command "pkill -f 'nc -N -l ${port}'" 2>/dev/null
-		done
+		stop_remote_listeners "${REMOTE_LISTENER_PORTS[@]}"
+		remove_remote_status_dir
 		close_ssh_connection
 	fi
 	exit 130

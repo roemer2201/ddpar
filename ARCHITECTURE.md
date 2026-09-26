@@ -62,7 +62,7 @@ dd if=INPUT ... | nc REMOTE_HOST PORT  &
 
 **Remote (startet zuerst als Listener):**
 ```
-nc -N -l PORT | dd of=OUTPUT ...  (SSH-Prozess bleibt lokal im Hintergrund verbunden)
+nc -N -l PORT | dd of=OUTPUT ...  (via SSH mit nohup abgekoppelt, Status in Datei)
 ```
 
 Das Skript prüft nach dem Start des Remote-Listeners per `ss -tln`, ob der Port
@@ -182,11 +182,35 @@ allen Fällen die Hashes der **Rohdaten** des Segments.
 
 Beim Remote-Clone und Remote-Backup schreibt die Gegenseite: wenn der lokale
 Sender fertig ist, kann dort noch gepuffertes Material unterwegs sein — im Modus
-`c` muss zusätzlich `gzip` den Rest der Pipe verarbeiten. Der lokal gestartete
-SSH-Prozess bleibt daher bis zum Ende der Remote-Pipeline verbunden. Die Pipeline
-läuft mit Bash `pipefail`; `wait_for_jobs()` sammelt sowohl die lokalen als auch
-die entfernten Exit-Status ein. Ein Fehler auf der Gegenseite oder ein Timeout
-führt zu einem Fehlerstatus des Aufrufs.
+`c` muss zusätzlich `gzip` den Rest der Pipe verarbeiten.
+
+Jede Remote-Pipeline wird per `nohup` von SSH abgekoppelt gestartet, sodass nur
+kurze SSH-Sitzungen über den ControlMaster laufen. Dauerhaft offene Sitzungen je
+Teil-Job würden bei vielen Jobs das sshd-Limit `MaxSessions` (Standard 10)
+überschreiten; ssh wiche dann auf neue Verbindungen aus, die bei Passwort-Login
+im Hintergrund nicht authentifizieren können.
+
+Ein Wrapper (`REMOTE_JOB_WRAPPER`) führt die Pipeline mit Bash `pipefail` aus und
+legt im privaten Statusverzeichnis (`mktemp -d /tmp/ddpar-status.XXXXXX` auf der
+Gegenseite) je Job ab:
+
+| Datei | Inhalt |
+|---|---|
+| `jobN-PORT.pid` | PID des Wrappers (Lebendprüfung per `kill -0`) |
+| `jobN-PORT.rc` | Exit-Status der gesamten Pipeline (atomar via `mv`) |
+| `jobN-PORT.log` | stdout/stderr der Pipeline (letzte Zeilen werden bei Fehlern ausgegeben) |
+
+`wait_for_jobs()` sammelt zuerst die lokalen Exit-Status ein und fragt danach je
+Remote-Job den Status ab (`remote_job_state`: `rc N`, `running` oder `missing`).
+Ein Exit-Status ungleich 0, ein fehlender Status oder eine nicht erreichbare
+Gegenseite führen zu einem Fehlerstatus des Aufrufs. Ein festes Zeitlimit gibt
+es bewusst nicht: Nach dem Ende des Senders kann die Gegenseite legitim noch
+lange schreiben (gzip, Flush beim Schließen eines Blockgeräts).
+
+Ist ein lokaler Job fehlgeschlagen oder ein Teil nicht gestartet worden, beendet
+`stop_remote_listeners` vorher die zugehörigen `nc`-Prozesse
+(`pkill -f '^nc -N -l PORT$'`), damit kein Listener ewig auf seinen Partner
+wartet. Das Statusverzeichnis wird am Ende (und bei SIGINT/SIGTERM) gelöscht.
 
 ---
 
@@ -268,7 +292,10 @@ Modus `n` braucht **kein** `gzip` auf der Gegenseite, Modus `c` schon
 | `is_ssh_socket_alive` | Prüft ob der SSH-Kontroll-Socket noch aktiv ist |
 | `execute_command` | Argument-Array lokal direkt, remote mit Shell-Quoting ausführen |
 | `execute_remote_command` | Befehl immer remote via SSH ausführen |
-| `execute_remote_background_command` | Remote-Pipeline über einen lokal im Hintergrund laufenden SSH-Prozess starten und dessen Status einsammeln |
+| `execute_remote_background_command` | Remote-Pipeline abgekoppelt (`nohup`) mit Status-Wrapper starten |
+| `ensure_remote_status_dir` / `remove_remote_status_dir` | Statusverzeichnis auf der Gegenseite anlegen bzw. löschen |
+| `remote_job_state` | Status eines Remote-Jobs abfragen (`rc N`, `running`, `missing`) |
+| `stop_remote_listeners` | `nc`-Prozesse auf den Remote-Ports beenden (Fehlerfall, Abbruch) |
 | `close_ssh_connection` | SSH-Multiplexing-Verbindung schließen |
 | `check_commands_availability` | Prüft ob benötigte Tools lokal vorhanden sind |
 | `check_remote_commands_availability` | Prüft ob benötigte Tools remote vorhanden sind |
@@ -284,6 +311,6 @@ Modus `n` braucht **kein** `gzip` auf der Gegenseite, Modus `c` schon
 | `backup_mode` | Backup in Teil-Dateien inkl. Metadaten (lokal und remote, optional komprimiert) |
 | `setup_remote_listener` | Startet je Teil einen `nc`-Empfänger auf dem Remote-Host |
 | `remote_compression_active` | Wahr, wenn [De]Kompression auf der Remote-Seite läuft (`-r c` + `-c`) |
-| `wait_for_jobs` | Wartet auf lokale Teil-Jobs und die zugehörigen SSH-Prozesse |
+| `wait_for_jobs` | Wartet auf lokale Teil-Jobs und fragt danach den Status der Remote-Pipelines ab |
 | `append_metadata` | Schreibt eine Zeile in die Metadatendatei (lokal oder remote) |
 | `register_job` / `wait_for_jobs` | Sammeln der Exit-Codes aller parallelen Teil-Jobs |

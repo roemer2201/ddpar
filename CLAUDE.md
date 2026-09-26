@@ -64,7 +64,7 @@ Manuelle Tests: siehe `TESTING.md`.
 - Remote Checks (`ddpar-check.sh -r`) vergleichen nur SHA256-Hashes je Segment (lokal vs. per SSH) — kein netcat-Datentransfer nötig
 - `RANDOM` in Bash liefert nur 0–32767 → Remote-Ports werden aus dem Bereich 10000–42767 gewählt
 - `fallocate` funktioniert nicht auf Block-Devices (wird korrekt übersprungen)
-- Nach dem Ende der lokalen Sender kann die Gegenseite noch schreiben (im Modus `c` puffert dort gzip); die lokale SSH-Sitzung bleibt bis zum Ende der Remote-Pipeline verbunden, und `wait_for_jobs()` prüft ihren Exit-Status (Bash `pipefail` auf der Gegenseite)
+- Nach dem Ende der lokalen Sender kann die Gegenseite noch schreiben (im Modus `c` puffert dort gzip); Remote-Pipelines laufen per `nohup` abgekoppelt (keine dauerhaften SSH-Sitzungen wegen sshd `MaxSessions`), ein Wrapper schreibt PID und Exit-Status (Bash `pipefail`) in ein Statusverzeichnis `/tmp/ddpar-status.*` auf der Gegenseite, das `wait_for_jobs()` abfragt — ohne festes Zeitlimit
 - Beliebige Eingabegrößen: `SPLIT_SIZE` wird auf die Blockgröße abgerundet, der letzte Teil überträgt den Rest (`part_bytes`, dd-Flags `count_bytes`/`skip_bytes`/`seek_bytes`)
 - Von den Remote-Modus-Flags (`-r l/n/c`) sind `n` und `c` implementiert, `l` nicht
 

@@ -232,3 +232,15 @@ load helpers
   [ ! -e "${TMP}/injected" ]
   cmp "${TMP}/source.bin" "${TMP}/out\$(touch injected)/source.bin"
 }
+
+@test "Restore akzeptiert aeltere Metadaten ohne INPUT_SIZE" {
+  make_testfile "${TMP}/source.bin" 1
+  mkdir -p "${TMP}/backup"
+  vrun "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source.bin" -o "${TMP}/backup" -m backup -j 2 -b 4096
+  [ "${status}" -eq 0 ]
+  sed -i '/^INPUT_SIZE=/d' "${TMP}/backup/source.bin-metadata.txt"
+
+  vrun "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/backup/source.bin" -o "${TMP}/target.bin" -y
+  [ "${status}" -eq 0 ]
+  cmp "${TMP}/source.bin" "${TMP}/target.bin"
+}

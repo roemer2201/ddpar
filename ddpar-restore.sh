@@ -177,9 +177,54 @@ function execute_remote_background_command {
     echo "Fehler: Kein Befehl zum Ausführen angegeben."
     return 1
   fi
-  # SSH stays alive until the remote sender exits; its status is checked later.
-  ssh -n -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "bash -o pipefail -c $(shell_quote "${command}")" &
-  REMOTE_SSH_PID=$!
+  # Der Sender laeuft von SSH abgekoppelt (nohup), damit jeder Teil-Job nur
+  # kurze SSH-Sitzungen braucht: dauerhaft offene Sitzungen wuerden bei vielen
+  # Jobs das sshd-Limit MaxSessions (Standard 10) des ControlMasters reissen.
+  # Ein Wrapper legt PID und Exit-Status (Bash pipefail, deckt auch nc ab) im
+  # Statusverzeichnis ab; wait_for_jobs() fragt sie spaeter ab.
+  ensure_remote_status_dir || return 1
+  REMOTE_JOB_BASE="${REMOTE_STATUS_DIR}/job${#REMOTE_JOB_BASES[@]}-${CURRENT_REMOTE_PORT}"
+  execute_remote_command "nohup bash -c $(shell_quote "${REMOTE_JOB_WRAPPER}") ddpar-job $(shell_quote "${command}") $(shell_quote "${REMOTE_JOB_BASE}") < /dev/null > $(shell_quote "${REMOTE_JOB_BASE}.log") 2>&1 &"
+}
+
+# Wrapper fuer Remote-Pipelines: $1 = Pipeline, $2 = Basisname der Statusdateien.
+# Der Exit-Status wird atomar (tmp + mv) geschrieben.
+# shellcheck disable=SC2016 # wird erst auf dem Remote-Host ausgewertet
+REMOTE_JOB_WRAPPER='echo "$$" > "$2.pid"; bash -o pipefail -c "$1"; rc=$?; echo "${rc}" > "$2.tmp" && mv -f "$2.tmp" "$2.rc"'
+REMOTE_STATUS_DIR=""
+
+# Legt einmal pro Lauf ein privates Statusverzeichnis auf dem Remote-Host an.
+function ensure_remote_status_dir {
+  [ -n "${REMOTE_STATUS_DIR}" ] && return 0
+  REMOTE_STATUS_DIR=$(execute_remote_command "mktemp -d /tmp/ddpar-status.XXXXXX") || REMOTE_STATUS_DIR=""
+  if [ -z "${REMOTE_STATUS_DIR}" ]; then
+    echo "Fehler: Statusverzeichnis auf ${REMOTE_HOST} konnte nicht angelegt werden." >&2
+    return 1
+  fi
+}
+
+# Gibt "rc <n>", "running" oder "missing" fuer einen Remote-Job aus. Der zweite
+# rc-Test faengt einen Job ab, der zwischen den ersten beiden Tests endet.
+function remote_job_state {
+  local q
+  q=$(shell_quote "$1")
+  execute_remote_command "if [ -f ${q}.rc ]; then echo rc \$(cat ${q}.rc); elif [ -f ${q}.pid ] && kill -0 \$(cat ${q}.pid) 2>/dev/null; then echo running; elif [ -f ${q}.rc ]; then echo rc \$(cat ${q}.rc); else echo missing; fi"
+}
+
+# Beendet die nc-Prozesse auf den uebergebenen Remote-Ports. Der Anker ^...$
+# trifft nur nc selbst, nicht die Wrapper-Shells, damit diese noch den
+# Exit-Status ablegen koennen.
+function stop_remote_listeners {
+  local port
+  for port in "$@"; do
+    execute_remote_command "pkill -f '^nc -N -l ${port}\$'" > /dev/null 2>&1
+  done
+}
+
+function remove_remote_status_dir {
+  [ -z "${REMOTE_STATUS_DIR}" ] && return 0
+  execute_remote_command "rm -rf -- $(shell_quote "${REMOTE_STATUS_DIR}")" > /dev/null 2>&1
+  REMOTE_STATUS_DIR=""
 }
 
 function close_ssh_connection {
@@ -230,8 +275,11 @@ function remote_restore_commands {
   done
 
   echo "REMOTE COMMAND: ${remote_input_cmd} | nc -N -l ${CURRENT_REMOTE_PORT}"
-  execute_remote_background_command "${remote_input_cmd} | nc -N -l ${CURRENT_REMOTE_PORT}"
+  if ! execute_remote_background_command "${remote_input_cmd} | nc -N -l ${CURRENT_REMOTE_PORT}"; then
+    return 1
+  fi
   REMOTE_LISTENER_PORTS+=("${CURRENT_REMOTE_PORT}")
+  register_remote_job "${REMOTE_JOB_BASE}" "Remote-Sender Port ${CURRENT_REMOTE_PORT}"
 
   MAX_ATTEMPTS=3
   SLEEP_INTERVAL=1
@@ -251,11 +299,8 @@ function remote_restore_commands {
   done
   if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     echo "Process did not start on port ${CURRENT_REMOTE_PORT} after $MAX_ATTEMPTS attempts."
-    kill "${REMOTE_SSH_PID}" 2>/dev/null
-    wait "${REMOTE_SSH_PID}" 2>/dev/null
     return 1
   fi
-  register_remote_job "${REMOTE_SSH_PID}" "Remote-Sender Port ${CURRENT_REMOTE_PORT}"
 }
 
 # Verwaltung der parallelen Hintergrund-Jobs:
@@ -265,7 +310,8 @@ function remote_restore_commands {
 JOB_PIDS=()
 JOB_LABELS=()
 REMOTE_LISTENER_PORTS=()
-REMOTE_JOB_PIDS=()
+# Remote-Pipelines: Basisname ihrer Statusdateien im REMOTE_STATUS_DIR
+REMOTE_JOB_BASES=()
 REMOTE_JOB_LABELS=()
 
 function register_job {
@@ -274,7 +320,7 @@ function register_job {
 }
 
 function register_remote_job {
-  REMOTE_JOB_PIDS+=("${1}")
+  REMOTE_JOB_BASES+=("${1}")
   REMOTE_JOB_LABELS+=("${2}")
 }
 
@@ -293,31 +339,38 @@ function wait_for_jobs {
     echo "Fehler: Es wurde kein Restore-Job gestartet." >&2
     failed=$((failed + 1))
   fi
-  # A local receiver failure can leave an unused remote sender listening.
-  if [ "${failed}" -gt 0 ]; then
-    for i in "${!REMOTE_JOB_PIDS[@]}"; do
-      kill "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null || true
-    done
+  # Nach einem Fehler (lokaler Job oder nicht gestarteter Teil) wartet ein
+  # Remote-Sender eventuell ewig auf seinen Empfaenger -> nc dort beenden.
+  if [ "${failed}" -gt 0 ] || [ "${INTERNAL_EXITCODE}" -ne 0 ]; then
+    stop_remote_listeners "${REMOTE_LISTENER_PORTS[@]}"
   fi
-  for i in "${!REMOTE_JOB_PIDS[@]}"; do
-    local attempts=0
-    while kill -0 "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null && [ "${attempts}" -lt 240 ]; do
+  local state polls
+  for i in "${!REMOTE_JOB_BASES[@]}"; do
+    # Kein festes Zeitlimit; ist der Status nicht abrufbar, gilt der Job als
+    # fehlgeschlagen.
+    polls=0
+    while true; do
+      state=$(remote_job_state "${REMOTE_JOB_BASES[$i]}") || state="unreachable"
+      [ "${state}" != "running" ] && break
+      polls=$((polls + 1))
+      [ $((polls % 120)) -eq 0 ] && echo "${REMOTE_JOB_LABELS[$i]} laeuft noch ..."
       sleep 0.5
-      attempts=$((attempts + 1))
     done
-    if kill -0 "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null; then
-      echo "Fehler: ${REMOTE_JOB_LABELS[$i]} hat das Zeitlimit überschritten." >&2
-      kill "${REMOTE_JOB_PIDS[$i]}" 2>/dev/null || true
-      failed=$((failed + 1))
-    fi
-    wait "${REMOTE_JOB_PIDS[$i]}"
-    rc=$?
-    if [ "${rc}" -ne 0 ]; then
-      echo "Fehler: ${REMOTE_JOB_LABELS[$i]} ist mit Exit-Code ${rc} fehlgeschlagen." >&2
-      failed=$((failed + 1))
-    fi
+    case "${state}" in
+      "rc 0") ;;
+      "rc "*)
+        echo "Fehler: ${REMOTE_JOB_LABELS[$i]} ist mit Exit-Code ${state#rc } fehlgeschlagen." >&2
+        execute_remote_command "tail -n 5 -- $(shell_quote "${REMOTE_JOB_BASES[$i]}.log")" >&2 2>/dev/null
+        failed=$((failed + 1))
+        ;;
+      *)
+        echo "Fehler: Exit-Status von ${REMOTE_JOB_LABELS[$i]} ist nicht ermittelbar (${state})." >&2
+        failed=$((failed + 1))
+        ;;
+    esac
   done
-  REMOTE_JOB_PIDS=()
+  remove_remote_status_dir
+  REMOTE_JOB_BASES=()
   REMOTE_JOB_LABELS=()
   JOB_PIDS=()
   JOB_LABELS=()
@@ -333,7 +386,7 @@ function wait_for_jobs {
 function cleanup_on_signal {
   trap - INT TERM
   echo "Abbruch: Beende laufende Teil-Prozesse ..." >&2
-  local pids port
+  local pids
   pids=$(jobs -p)
   if [ -n "$pids" ]; then
     # shellcheck disable=SC2086 # PIDs sind whitespace-getrennt gewollt
@@ -341,9 +394,8 @@ function cleanup_on_signal {
     wait $pids 2>/dev/null
   fi
   if [ $REMOTE -eq 1 ] && is_ssh_socket_alive; then
-    for port in "${REMOTE_LISTENER_PORTS[@]}"; do
-      execute_remote_command "pkill -f 'nc -N -l ${port}'" 2>/dev/null
-    done
+    stop_remote_listeners "${REMOTE_LISTENER_PORTS[@]}"
+    remove_remote_status_dir
     close_ssh_connection
   fi
   exit 130
@@ -493,6 +545,13 @@ INPUT_FILE_TYPE=$(grep "^FILE_TYPE=" "$METADATA_SRC" | cut -d "=" -f 2)
 BLOCKSIZEBYTES=$(grep "^BLOCKSIZEBYTES=" "$METADATA_SRC" | cut -d "=" -f 2)
 COMPRESSION=$(grep "^COMPRESSION=" "$METADATA_SRC" | cut -d "=" -f 2)
 COMPRESSION_LEVEL=$(grep "^COMPRESSION_LEVEL=" "$METADATA_SRC" | cut -d "=" -f 2)
+
+# Aeltere Metadatendateien ohne INPUT_SIZE: glatte Teilung annehmen (wie
+# ddpar-check.sh). Erst nach Pruefung der Operanden rechnen, da Bash-Arithmetik
+# beliebige Strings als Ausdruck auswertet.
+if [ -z "${INPUT_SIZE}" ] && [[ "${SPLIT_SIZE}" =~ ^[1-9][0-9]*$ && "${NUM_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
+  INPUT_SIZE=$((SPLIT_SIZE * NUM_JOBS))
+fi
 
 if ! [[ "${NUM_JOBS}" =~ ^[1-9][0-9]*$ && "${BLOCKSIZEBYTES}" =~ ^[1-9][0-9]*$ &&
         "${INPUT_SIZE}" =~ ^[0-9]+$ && "${SPLIT_SIZE}" =~ ^[1-9][0-9]*$ ]]; then

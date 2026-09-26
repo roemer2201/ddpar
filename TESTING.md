@@ -301,10 +301,12 @@ case "$args" in
 esac
 cmd="${@: -1}"
 case "$cmd" in
-  *"file -b"*)   echo "directory"; exit 0;;
+  *"'file' '-b'"*) echo "directory"; exit 0;;  # execute_command quotet jedes Argument
   *"ss -tuln"*)  exit 0;;  # Verifikationsschleife: Prozess läuft
   *"ss -tln"*)   exit 1;;  # Portprüfung: Port frei
   *"nohup"*)     exit 0;;  # Empfänger-Start im Hintergrund
+  *"mktemp -d"*) echo /tmp/ddpar-status.stub; exit 0;;  # Statusverzeichnis
+  *"echo running"*) echo "rc 0"; exit 0;;  # Statusabfrage: Pipeline erfolgreich
   *"command -v"*) exit 0;;
   *) exit 0;;
 esac
@@ -363,6 +365,8 @@ case "$cmd" in
   *"ss -tuln"*) exit 0;;   # Sender-Listener läuft
   *"ss -tln"*)  exit 1;;   # Port frei
   *"nohup"*)    exit 0;;   # Remote-Sender im Hintergrund
+  *"mktemp -d"*) echo /tmp/ddpar-status.stub; exit 0;;  # Statusverzeichnis
+  *"echo running"*) echo "rc 0"; exit 0;;  # Statusabfrage: Pipeline erfolgreich
   *true)        exit 0;;
   *) exit 0;;
 esac

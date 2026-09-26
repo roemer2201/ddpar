@@ -459,7 +459,9 @@ if [ ! -z "${BASE_PATH}" ]; then
   BLOCKSIZEBYTES=$(grep "^BLOCKSIZEBYTES=" "$META_SRC" | cut -d "=" -f 2)
   COMPRESSION=$(grep "^COMPRESSION=" "$META_SRC" | cut -d "=" -f 2)
   # Ältere Metadatendateien ohne INPUT_SIZE: glatte Teilung annehmen
-  [ -z "$INPUT_SIZE" ] && INPUT_SIZE=$((SPLIT_SIZE * NUM_JOBS))
+  if [ -z "$INPUT_SIZE" ] && [[ "${SPLIT_SIZE}" =~ ^[1-9][0-9]*$ && "${NUM_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
+    INPUT_SIZE=$((SPLIT_SIZE * NUM_JOBS))
+  fi
   if ! [[ "${NUM_JOBS}" =~ ^[1-9][0-9]*$ && "${BLOCKSIZEBYTES}" =~ ^[1-9][0-9]*$ &&
           "${INPUT_SIZE}" =~ ^[0-9]+$ && "${SPLIT_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
     echo "Fehler: Ungültige numerische Backup-Metadaten." >&2

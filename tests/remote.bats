@@ -49,18 +49,46 @@ remote_teardown() {
   require_remote_support
   make_testfile "${TMP}/src.bin" 1
   mkdir -p "${TMP}/back\$(touch injected)"
+  # Eine ausgefuehrte Substitution legt "injected" im Arbeitsverzeichnis an:
+  # lokal in ${TMP}, auf der Gegenseite im Home-Verzeichnis des SSH-Benutzers.
+  cd "${TMP}"
+  ssh "${REMOTE_TEST_HOST}" 'rm -f injected'
 
   run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/src.bin" -o "${TMP}/back\$(touch injected)" \
     -m backup -j 2 -n "odd' name" -r n -R "${REMOTE_TEST_HOST}"
   remote_teardown
   [ "${status}" -eq 0 ]
   [ ! -e "${TMP}/injected" ]
+  ssh "${REMOTE_TEST_HOST}" 'test ! -e injected'
 
   run "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/back\$(touch injected)/odd' name" \
     -o "${TMP}/restored.bin" -y -r n -R "${REMOTE_TEST_HOST}"
   remote_teardown
   [ "${status}" -eq 0 ]
+  [ ! -e "${TMP}/injected" ]
+  ssh "${REMOTE_TEST_HOST}" 'test ! -e injected'
   cmp "${TMP}/src.bin" "${TMP}/restored.bin"
+}
+
+@test "Remote Backup -> Restore mit 12 Jobs (mehr als sshd MaxSessions) ist bitgenau" {
+  require_remote_support
+  make_testfile "${TMP}/src.bin" 4
+  mkdir -p "${TMP}/rbackup"
+  local status_dirs
+  status_dirs=$(ssh "${REMOTE_TEST_HOST}" 'ls -d /tmp/ddpar-status.* 2>/dev/null' || true)
+
+  # Remote-Pipelines laufen abgekoppelt und halten keine SSH-Sitzung offen;
+  # mehr Jobs als das sshd-Limit MaxSessions (Standard 10) muessen daher gehen.
+  run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/src.bin" -o "${TMP}/rbackup" -m backup -j 12 -b 4096 -r n -R "${REMOTE_TEST_HOST}"
+  remote_teardown
+  [ "${status}" -eq 0 ]
+
+  run "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/rbackup/src.bin" -o "${TMP}/restored.bin" -y -r n -R "${REMOTE_TEST_HOST}"
+  remote_teardown
+  [ "${status}" -eq 0 ]
+  cmp "${TMP}/src.bin" "${TMP}/restored.bin"
+  # Die Statusverzeichnisse auf der Gegenseite werden aufgeraeumt
+  [ "$(ssh "${REMOTE_TEST_HOST}" 'ls -d /tmp/ddpar-status.* 2>/dev/null' || true)" = "${status_dirs}" ]
 }
 
 @test "Remote Clone mit -r ohne Modusangabe nutzt Modus n" {
