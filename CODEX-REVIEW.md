@@ -28,7 +28,7 @@ sich auf den Ausgangsstand, nicht auf einen noch offenen Fehler.
 | P1 | `-s` nutzte `tee >(sha256sum …)`, ohne den Prüfsummenprozess zu warten. Fehler beim Schreiben der Sidecars konnten als erfolgreiche Sicherung erscheinen. | Prüfsumme nach erfolgreichem Schreiben innerhalb desselben gewarteten Jobs erzeugen. Ein absichtlich fehlschlagender sha256sum-Worker muss den Aufruf fehlschlagen lassen. |
 | P1 | Ein fehlerhafter oder abgebrochener neuer Backup-Lauf konnte normal aussehende Metadaten und eine Mischung aus alten/neuen Teilen hinterlassen. Erneutes Backup ohne `-s` ließ veraltete Sidecars stehen. | Neue Metadaten zunächst `BACKUP_STATE=incomplete`; erst nach Erfolg aller Jobs und Längenprüfungen auf `complete` setzen. Restore/Check verweigern unvollständige neue Backups. Veraltete Sidecars bei Sicherung ohne `-s` entfernen. |
 | P1 | Erfolgreiche dd-/nc-Exitcodes belegten keine vollständig empfangene Rohdatenmenge beim Clone/Restore. | `ddpar_write_segment` begrenzt die Schreibmenge und zählt zugleich alle empfangenen Bytes über einen explizit gewarteten Prozess. Tests für frühes EOF und `/dev/full`. |
-| P1 | Abbruchbehandlung mit `jobs -p` erreichte nur Prozessgruppenführer und konnte weitere dd/nc-Prozesse weiterlaufen lassen. | Lokale Prozessbäume rekursiv beenden; Remote-Jobs über `setsid` in eigenen Gruppen starten und nur diese Gruppen beenden. TERM-Regression prüft einen blockierten Worker samt Kindprozess. |
+| P1 | Abbruchbehandlung mit `jobs -p` erreichte nur Prozessgruppenführer und konnte weitere dd/nc-Prozesse weiterlaufen lassen. | Lokale Prozessbäume unter Berücksichtigung von PID-Namespaces rekursiv beenden; Remote-Jobs über `setsid` in eigenen Gruppen starten und nur diese Gruppen beenden. TERM-Regression prüft einen blockierten Worker samt Kindprozess. |
 | P1 | Die Auswahl des nicht implementierten verschlüsselten Modus `l` setzte den Transfer trotz Warnung unverschlüsselt fort. | Vor Verbindungsaufbau/Datenübertragung mit Fehler abbrechen. CLI-Test und korrigierte Sicherheitsdokumentation. |
 | P2 | Regex-Prüfungen allein verhinderten weder Zahlenüberlauf noch ungültige Produkt-/Offsetwerte; doppelte Metadatenschlüssel und Dateinamen mit `=` wurden mit grep/cut nicht sauber behandelt. | Gemeinsamer Datenparser mit Duplikatprüfung, kanonischen Dezimalzahlen und 64-Bit-Grenzen; Faktoren vor Multiplikation prüfen. Ältere Metadaten ohne INPUT_SIZE bleiben lesbar. Negativtests und Roundtrip mit `a=b#c&d`. |
 | P2 | SSH-Verbindungsfehler konnten als erfolgreicher Aufbau ausgegeben werden. Netcat nutzte den Aliasnamen statt dessen SSH-HostName. Remote-Checks mit vielen Jobs konnten MaxSessions überschreiten. | Fehler direkt weitergeben; Adresse über `ssh -G` auflösen; höchstens vier lange Hash-Sitzungen zugleich. 12-Segment-Remote-Check ergänzt. |
@@ -52,6 +52,11 @@ sich auf den Ausgangsstand, nicht auf einen noch offenen Fehler.
 - Der dedizierte GitHub-Actions-Job prüft echte SSH-Verbindungen zu localhost
   und Blockgeräte als Loop-Devices. Maßgeblich ist dessen Ergebnis für den
   jeweiligen PR-Commit, zusätzlich zu den unprivilegierten Datei- und Lint-Jobs.
+  Der erste Implementierungsstand `52c7051` bestand alle drei Jobs; der
+  [Integrationslauf](https://github.com/roemer2201/ddpar/actions/runs/38981404040)
+  führte alle 21 SSH-/Blockgerätetests ohne Skip erfolgreich aus. Die nachfolgende
+  Härtung berücksichtigt zusätzlich abweichende PID-Namespaces und Kernel ohne
+  `/proc/.../children`; der Abbruchtest hat dafür ein 10-Sekunden-Limit.
 
 ## Auswirkungen und verbleibende Grenzen
 

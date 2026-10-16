@@ -205,6 +205,7 @@ Gegenseite) je Job ab:
 | Datei | Inhalt |
 |---|---|
 | `jobN-PORT.pid` | PID und Prozessgruppen-ID des Wrappers (Lebendprüfung plus Zombie-Erkennung) |
+| `jobN-PORT.proc` | PID im eingebundenen `/proc` (auch bei abweichendem PID-Namespace) |
 | `jobN-PORT.rc` | Exit-Status der gesamten Pipeline (atomar via `mv`) |
 | `jobN-PORT.log` | stdout/stderr der Pipeline (letzte Zeilen werden bei Fehlern ausgegeben) |
 

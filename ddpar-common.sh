@@ -2,7 +2,7 @@
 # Shared validation and SSH helpers for ddpar; source from the three commands.
 # Flow: validate decimal metadata; verify complete parts; isolate SSH sessions;
 # release private resources on every exit path.
-# Version: 1.0.0 (2026-10-17)
+# Version: 1.0.1 (2026-10-17)
 
 # Convert documented long aliases without changing data after -i/-o or --.
 ddpar_normalize_args() {
@@ -232,11 +232,16 @@ remote_job_state() {
 if [ -f "$base.rc" ]; then printf "rc "; cat "$base.rc"; exit; fi
 if [ -f "$base.pid" ]; then
   read -r pid < "$base.pid"
-  if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [ -r "/proc/$pid/stat" ]; then
-    read -r stat < "/proc/$pid/stat" || true
-    fields=${stat##*) }
-    state=${fields%% *}
-    if [ "$state" != Z ] && kill -0 "$pid" 2>/dev/null; then echo running; exit; fi
+  proc_pid=$pid
+  [ -f "$base.proc" ] && read -r proc_pid < "$base.proc"
+  if [[ "$pid" =~ ^[1-9][0-9]*$ && "$proc_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
+    state=unknown
+    if [ -r "/proc/$proc_pid/stat" ]; then
+      read -r stat < "/proc/$proc_pid/stat" || true
+      fields=${stat##*) }
+      state=${fields%% *}
+    fi
+    if [ "$state" != Z ]; then echo running; exit; fi
   fi
 fi
 if [ -f "$base.rc" ]; then printf "rc "; cat "$base.rc"; else echo missing; fi'
@@ -251,15 +256,66 @@ close_ssh_connection() {
   fi
 }
 
+# Translate /proc-visible child IDs into this shell's PID namespace. /proc can
+# be mounted from an ancestor namespace (as in some execution sandboxes).
+ddpar_namespace_pid() {
+  local proc_pid="${1}" key values
+  local -a ids=()
+  while read -r key values; do
+    if [ "${key}" = NSpid: ]; then
+      read -r -a ids <<< "${values}"
+      printf '%s\n' "${ids[DDPAR_PID_LEVEL]}"
+      return 0
+    fi
+  done < "/proc/${proc_pid}/status"
+  printf '%s\n' "${proc_pid}"
+}
+
+# Find the namespace depth without launching a process whose /proc/self would
+# refer to that child instead of this shell.
+DDPAR_PID_LEVEL=0
+while read -r ddpar_key ddpar_values; do
+  if [ "${ddpar_key}" = NSpid: ]; then
+    read -r -a ddpar_ids <<< "${ddpar_values}"
+    DDPAR_PID_LEVEL=$((${#ddpar_ids[@]} - 1))
+    break
+  fi
+done < /proc/thread-self/status
+
+# The kernel's children file is optional (CONFIG_CHECKPOINT_RESTORE). Fall
+# back to PPid fields when it is absent, keeping IDs in /proc's namespace.
+ddpar_child_pids() {
+  local parent="${1}" status_file key value
+  DDPAR_CHILDREN=''
+  if [ -r "/proc/${parent}/task/${parent}/children" ]; then
+    read -r DDPAR_CHILDREN < "/proc/${parent}/task/${parent}/children" || true
+    return 0
+  fi
+  for status_file in /proc/[0-9]*/status; do
+    [ -r "${status_file}" ] || continue
+    # A process can disappear while scanning /proc; that race is harmless.
+    while read -r key value; do
+      if [ "${key}" = PPid: ]; then
+        if [ "${value}" = "${parent}" ]; then
+          value=${status_file#/proc/}
+          DDPAR_CHILDREN+=" ${value%/status}"
+        fi
+        break
+      fi
+    done < "${status_file}" 2>/dev/null
+  done
+}
+
 # Stop descendants before their parent, including all stages of pipelines.
 # Linux /proc provides the child list without matching unrelated process names.
 ddpar_stop_tree() {
-  local pid="${1}" children child
+  local proc_pid="${1}" pid children child
+  pid=$(ddpar_namespace_pid "${proc_pid}") || return 0
+  [ -n "${pid}" ] || return 0
   kill -STOP "${pid}" 2>/dev/null || return 0
-  if [ -r "/proc/${pid}/task/${pid}/children" ]; then
-    read -r children < "/proc/${pid}/task/${pid}/children" || true
-    for child in ${children}; do ddpar_stop_tree "${child}"; done
-  fi
+  ddpar_child_pids "${proc_pid}"
+  children=${DDPAR_CHILDREN}
+  for child in ${children}; do ddpar_stop_tree "${child}"; done
   kill -TERM "${pid}" 2>/dev/null || true
   kill -CONT "${pid}" 2>/dev/null || true
 }
@@ -269,11 +325,11 @@ ddpar_stop_tree() {
 # shellcheck disable=SC2317 # Called indirectly by trap.
 ddpar_cancel() {
   trap - INT TERM
-  local children child
-  if [ -r "/proc/$$/task/$$/children" ]; then
-    read -r children < "/proc/$$/task/$$/children" || true
-    for child in ${children}; do ddpar_stop_tree "${child}"; done
-  fi
+  local children child own_proc_pid
+  read -r own_proc_pid _ < /proc/thread-self/stat
+  ddpar_child_pids "${own_proc_pid}"
+  children=${DDPAR_CHILDREN}
+  for child in ${children}; do ddpar_stop_tree "${child}"; done
   wait
   exit 130
 }

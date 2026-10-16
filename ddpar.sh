@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Clone or back up files and block devices in parallel segments.
-# Version: 1.0.1 (2026-10-17)
+# Version: 1.0.2 (2026-10-17)
 # Flow: validate options and endpoints; calculate segments; run local or remote
 # workers; collect every worker's result before reporting success.
 
@@ -271,7 +271,7 @@ function execute_remote_background_command {
 # Wrapper fuer Remote-Pipelines: $1 = Pipeline, $2 = Basisname der Statusdateien.
 # Der Exit-Status wird atomar (tmp + mv) geschrieben.
 # shellcheck disable=SC2016 # wird erst auf dem Remote-Host ausgewertet
-REMOTE_JOB_WRAPPER='echo "$$" > "$2.pid"; bash -o pipefail -c "$1"; rc=$?; echo "${rc}" > "$2.tmp" && mv -f "$2.tmp" "$2.rc"'
+REMOTE_JOB_WRAPPER='echo "$$" > "$2.pid"; read -r proc_pid _ < /proc/thread-self/stat; echo "$proc_pid" > "$2.proc"; bash -o pipefail -c "$1"; rc=$?; echo "${rc}" > "$2.tmp" && mv -f "$2.tmp" "$2.rc"'
 REMOTE_STATUS_DIR=""
 
 # Legt einmal pro Lauf ein privates Statusverzeichnis auf dem Remote-Host an.

@@ -219,7 +219,8 @@ exec /usr/bin/dd "$@"
 EOF
   chmod +x "${TMP}/bin/dd"
   printf source > "${TMP}/source"
-  vrun env PATH="${TMP}/bin:${PATH}" DDPAR_TEST_PIDFILE="${TMP}/child" bash -c '
+  # The test must fail if cancellation merely waits for sleep's natural EOF.
+  vrun timeout 10 env PATH="${TMP}/bin:${PATH}" DDPAR_TEST_PIDFILE="${TMP}/child" bash -c '
     "$1/ddpar.sh" -i "$2/source" -o "$2/out" -j 1 & main=$!
     for ((n=0; n<100; n++)); do [ -s "$2/child" ] && break; sleep .05; done
     [ -s "$2/child" ] || { kill -TERM "$main"; exit 1; }
