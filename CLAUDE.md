@@ -14,6 +14,7 @@ die gleichzeitig über separate `dd`-Prozesse verarbeitet werden.
 | `ddpar.sh` | Hauptskript: Clone- und Backup-Modus, lokal und remote |
 | `ddpar-restore.sh` | Wiederherstellen eines mit `ddpar.sh -m backup` erstellten Backups |
 | `ddpar-check.sh` | Prüfung der Integrität via SHA256 (Quelle↔Backup oder Backup↔Ziel) |
+| `ddpar-common.sh` | Gemeinsame Metadaten-, Datenstrom- und SSH-Helfer; neben den Einstiegsskripten ausliefern |
 | `TESTING.md` | Manuelle Testszenarien mit Beispielkommandos |
 | `ARCHITECTURE.md` | Design-Dokumentation: Parallelisierung, Pipes, Remote-Konzept |
 | `CHANGELOG.md` | Versionshistorie und Bug-Fix-Dokumentation |
@@ -26,7 +27,7 @@ die gleichzeitig über separate `dd`-Prozesse verarbeitet werden.
 - **Shell-Befehle:** Lokale Argumente als Array übergeben; dynamische Remote-Pfade
   vor dem Einbetten in einen SSH-Befehl als einzelne Shell-Argumente quotieren
 - **Tests:** `[ -z "$VAR" ]` mit Quotes — nie `[ -z $VAR ]`
-- **grep in Metadaten:** Immer mit `^`-Anker, z.B. `grep "^KEY="`, um Prefix-Matches zu vermeiden
+- **Metadaten:** Den Datenparser in `ddpar-common.sh` verwenden; nicht sourcen oder mit getrennten grep/cut-Aufrufen zerlegen.
 - **Farb-Echo:** Immer `echo -e` wenn ANSI-Codes (`${INFOCOLOR}` etc.) ausgegeben werden
 - **Port-Prüfung:** `grep -qE ":PORT[^0-9]"` — niemals `:PORT` ohne Suffix (Substring-Matching)
 
@@ -58,7 +59,7 @@ Manuelle Tests: siehe `TESTING.md`.
 
 - Remote Clone, Backup, Restore und Checks (netcat) sind implementiert — unkomprimiert, mit **lokaler [De]Kompression** (`-c` + `-r n`: gzip/zcat laufen lokal, die Gegenseite schreibt/liest nur `.gz`-Dateien und braucht kein gzip) und mit **Remote-[De]Kompression** (`-c` + `-r c`: gzip/zcat laufen auf der Gegenseite, dort erforderlich)
 - `-c` im Clone-Modus ist nur mit `-r c` möglich (die Gegenseite dekomprimiert vor dem Schreiben); ohne `-r c` folgt eine Warnung und der Clone läuft unkomprimiert
-- Offen bleibt der verschlüsselte Datenkanal (`-r l`, fällt mit Warnung auf `n` zurück)
+- Offen bleibt der verschlüsselte Datenkanal (`-r l`, wird mit Fehlerstatus abgelehnt)
 - Die `.gz`-Teile aus `-r n` und `-r c` sind identisch — Backups sind zwischen den Modi austauschbar
 - `-s` (Checksummen-Dateien) wird im Remote-Modus nicht angewendet; Remote-Backups prüft man mit `ddpar-check.sh -r` über Laufzeit-Hashes
 - Remote Checks (`ddpar-check.sh -r`) vergleichen nur SHA256-Hashes je Segment (lokal vs. per SSH) — kein netcat-Datentransfer nötig
@@ -72,3 +73,12 @@ Manuelle Tests: siehe `TESTING.md`.
 
 - `main` — stabiler Stand
 - `claude/*` — von Claude Code erstellte Feature-/Fix-Branches
+
+## Integritätsregeln
+
+- Neue Backups erst nach erfolgreicher Teile- und Jobprüfung als `complete` markieren.
+- Jeder Clone-/Restore-Schreiber muss die tatsächliche Datenmenge kontrollieren.
+- Zielpfade vor dem Öffnen vollständig auflösen; Backups nicht durch den Restore überschreiben.
+- Private SSH-Sockets je Aufruf; Remote-Befehle mit Bash `pipefail` ausführen.
+- Remote-Gruppen via `setsid` isolieren; bei Abbruch eigene Prozessbäume beenden.
+- `make lint` prüft auch die Hilfsdatei und Docker-Skripte; der volle Report ist CI-Gate.

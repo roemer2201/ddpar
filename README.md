@@ -12,16 +12,19 @@ unterstützt: Ein nicht gleichmäßig verteilbarer Rest wird vom letzten Teil
 |---|---|
 | `ddpar.sh` | Klonen (`-m clone`, Default) oder Sichern (`-m backup`), lokal und remote |
 | `ddpar-restore.sh` | Wiederherstellen eines mit `ddpar.sh -m backup` erstellten Backups |
+| `ddpar-common.sh` | Gemeinsame Validierung, SSH-Verwaltung und Datenstromprüfung (wird eingelesen) |
 | `ddpar-check.sh` | Integritätsprüfung via SHA256 (Quelle↔Backup, Backup↔Ziel oder Quelle↔Ziel) |
 
 ## Voraussetzungen
 
-- Bash, GNU coreutils (`dd` mit `count_bytes`/`skip_bytes`/`seek_bytes`), `file`, `blockdev`
+**Installation:** Alle vier `ddpar*.sh`-Dateien müssen im selben Verzeichnis liegen.
+
+- Linux mit `/proc`, Bash ab 4.3, GNU coreutils (`dd` mit `count_bytes`/`skip_bytes`/`seek_bytes`), `file`, `blockdev`
 - `gzip` (bei Kompression), `sha256sum` (bei Checksummen)
 - Für Remote-Betrieb: `ssh`, `nc` (netcat-openbsd), `ss`; optional `sshpass` für Passwort-Login.
   Auf dem Remote-Host zusätzlich Bash für die Fehlerweitergabe der Pipelines,
-  ein beschreibbares `/tmp` für die Statusdateien, optional `pkill` (procps) zum
-  Beenden von Listenern nach Fehlern und `gzip` bei `-r c` (bei `-r n` **nicht** nötig)
+  `setsid` (util-linux), ein beschreibbares `/tmp` für die Statusdateien und
+  `gzip` bei `-r c` (bei `-r n` **nicht** nötig)
 
 ## Schnellstart
 
@@ -105,13 +108,50 @@ Verglichen werden in allen Fällen die Hashes der Rohdaten.
   den Modi `n` und `c` jedoch unverschlüsselt über netcat** (Kompression ist
   keine Verschlüsselung). Nur in vertrauenswürdigen Netzen verwenden. Ein
   vollständig verschlüsselter Modus (`l`) ist geplant, aber noch nicht
-  implementiert.
+  implementiert. Ein Aufruf mit `-r l` bricht ab und sendet keine Nutzdaten.
 - Host-Keys werden mit `StrictHostKeyChecking=accept-new` behandelt: Unbekannte
   Hosts werden beim Erstkontakt akzeptiert, ein **geänderter** Host-Key führt
   zum Abbruch.
 - Passwörter (optional via `sshpass`) werden über die Umgebung übergeben und
   tauchen nicht in der Prozessliste auf. Im Debug-Modus (`-d`) können
   Passwörter im Klartext ausgegeben werden.
+
+## Integrität und Zielschutz
+
+Ein Clone auf eine vorhandene Datei benötigt `-f`, auch wenn `-o` ein
+Verzeichnis ist. Ein noch nicht vorhandenes Dateiziel wird direkt angelegt.
+Symlinks zu Dateien und Blockgeräten werden beim Bestimmen von Typ und Größe
+aufgelöst; Quelle und Ziel dürfen lokal nicht dieselbe Datei sein.
+
+Vor einem Restore werden alle Teile auf ihre tatsächliche Rohdatenlänge
+geprüft. Komprimierte Teile werden dabei vollständig dekomprimiert, einschließlich
+CRC-Prüfung. Lokal vorhandene `.sha256`-Dateien werden ebenfalls geprüft.
+Reguläre Zieldateien erhalten exakt die gesicherte Länge; größere Blockgeräte
+behalten ihren Bereich hinter dem gesicherten Abbild.
+
+Der lokale Check benötigt weiterhin mit `-s` erzeugte Prüfsummen, liest jetzt
+aber auch die tatsächlichen Backup-Teile. Ein unverändertes Original allein
+kann daher kein beschädigtes oder fehlendes Backup mehr als korrekt bestätigen.
+Remote-Checks vergleichen die tatsächlichen Teile direkt mit Quelle oder Ziel.
+
+Neue Backups enthalten `BACKUP_STATE=incomplete`, bis alle Jobs und die
+Längenprüfung erfolgreich abgeschlossen sind. Erst dann wird der Status
+`complete` gesetzt. Restore und Check lehnen unvollständige Backups ab.
+Ältere Backups ohne dieses Feld bleiben lesbar. Ein erneutes Backup überschreibt
+weiterhin seine bisherigen Teile; für getrennte Generationen eigene Basisnamen
+oder Verzeichnisse verwenden. Während der Operation müssen Quelle und
+Backup-Dateien unverändert bleiben; ddpar erzeugt keinen Dateisystem-Snapshot.
+
+Jeder Remote-Aufruf verwendet einen eigenen privaten SSH-Control-Socket.
+SSH-Aliase werden für netcat über `ssh -G` in ihre `HostName`-Adresse aufgelöst;
+diese Adresse muss vom ausführenden Host direkt erreichbar sein. Ein SSH
+`ProxyJump` transportiert den separaten netcat-Datenkanal nicht automatisch.
+Die netcat-Clients begrenzen Verbindungsaufbau und Netzwerk-Inaktivität auf
+300 Sekunden; `DDPAR_NETWORK_TIMEOUT` überschreibt diesen Wert (positive ganze
+Sekunden). Der abschließende Schreibvorgang auf der Gegenseite hat weiterhin
+kein pauschales Zeitlimit. Tote oder als Zombie verbliebene Remote-Wrapper
+werden als Fehler erkannt. SIGINT/SIGTERM beendet lokale Prozessbäume und die
+zu diesem Aufruf gehörenden Remote-Prozessgruppen.
 
 ## Exit-Codes
 

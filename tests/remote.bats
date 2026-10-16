@@ -15,11 +15,7 @@
 
 load helpers
 
-remote_teardown() {
-  # ddpar nutzt einen festen SSH-Control-Socket; nach (Teil-)Abbrüchen schließen.
-  ssh -S /tmp/ssh_socket_ddpar -O exit "$REMOTE_TEST_HOST" 2>/dev/null || true
-  rm -f /tmp/ssh_socket_ddpar
-}
+
 
 @test "Remote Clone Datei (-r n) ist bitgenau" {
   require_remote_support
@@ -28,21 +24,19 @@ remote_teardown() {
   mkdir -p "$TMP/rdest"
 
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rdest" -m clone -r n -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
 
   cmp "$TMP/src.bin" "$TMP/rdest/src.bin"
 }
 
-@test "Remote clone reports a failure from the remote writer" {
+@test "Remote clone rejects an unsupported character-device destination" {
   require_remote_support
   ssh "${REMOTE_TEST_HOST}" 'test -w /dev/full' || skip "/dev/full is unavailable remotely"
   make_testfile "${TMP}/src.bin" 1
 
   run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/src.bin" -o /dev/full -f -j 1 -r n -R "${REMOTE_TEST_HOST}"
-  remote_teardown
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"Remote-Empfänger"* ]]
+  [[ "${output}" == *"unsupported clone destination"* || "${output}" == *"Remote-Empfänger"* ]]
 }
 
 @test "Remote backup paths with quotes and literal substitution roundtrip safely" {
@@ -56,14 +50,12 @@ remote_teardown() {
 
   run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/src.bin" -o "${TMP}/back\$(touch injected)" \
     -m backup -j 2 -n "odd' name" -r n -R "${REMOTE_TEST_HOST}"
-  remote_teardown
   [ "${status}" -eq 0 ]
   [ ! -e "${TMP}/injected" ]
   ssh "${REMOTE_TEST_HOST}" 'test ! -e injected'
 
   run "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/back\$(touch injected)/odd' name" \
     -o "${TMP}/restored.bin" -y -r n -R "${REMOTE_TEST_HOST}"
-  remote_teardown
   [ "${status}" -eq 0 ]
   [ ! -e "${TMP}/injected" ]
   ssh "${REMOTE_TEST_HOST}" 'test ! -e injected'
@@ -80,11 +72,9 @@ remote_teardown() {
   # Remote-Pipelines laufen abgekoppelt und halten keine SSH-Sitzung offen;
   # mehr Jobs als das sshd-Limit MaxSessions (Standard 10) muessen daher gehen.
   run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/src.bin" -o "${TMP}/rbackup" -m backup -j 12 -b 4096 -r n -R "${REMOTE_TEST_HOST}"
-  remote_teardown
   [ "${status}" -eq 0 ]
 
   run "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/rbackup/src.bin" -o "${TMP}/restored.bin" -y -r n -R "${REMOTE_TEST_HOST}"
-  remote_teardown
   [ "${status}" -eq 0 ]
   cmp "${TMP}/src.bin" "${TMP}/restored.bin"
   # Die Statusverzeichnisse auf der Gegenseite werden aufgeraeumt
@@ -99,7 +89,6 @@ remote_teardown() {
 
   # "-r" ohne Modus darf die folgende Option (-R) nicht verschlucken
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rdest" -m clone -r -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
   [[ "$output" == *"REMOTE COMMAND"* ]]
 
@@ -113,13 +102,11 @@ remote_teardown() {
   mkdir -p "$TMP/rbackup"
 
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rbackup" -m backup -r n -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
   [ -f "$TMP/rbackup/src.bin-0.part" ]
   [ -f "$TMP/rbackup/src.bin-metadata.txt" ]
 
   run "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/rbackup/src.bin" -o "$TMP/restored.bin" -r n -R "$REMOTE_TEST_HOST" -y
-  remote_teardown
   [ "$status" -eq 0 ]
 
   cmp "$TMP/src.bin" "$TMP/restored.bin"
@@ -135,7 +122,6 @@ remote_teardown() {
   mkdir -p "$TMP/rbackup"
 
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rbackup" -m backup -c -r n -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
   # Komprimiert wird lokal, auf der Gegenseite landen .gz-Teile
   [ -f "$TMP/rbackup/src.bin-0.gz" ]
@@ -144,7 +130,6 @@ remote_teardown() {
   grep -q "^COMPRESSION_LEVEL=" "$TMP/rbackup/src.bin-metadata.txt"
 
   run "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/rbackup/src.bin" -o "$TMP/restored.bin" -r n -R "$REMOTE_TEST_HOST" -y
-  remote_teardown
   [ "$status" -eq 0 ]
 
   cmp "$TMP/src.bin" "$TMP/restored.bin"
@@ -158,11 +143,9 @@ remote_teardown() {
   mkdir -p "$TMP/rbackup"
 
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rbackup" -m backup -c -r n -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
 
   run "$REPO_ROOT/ddpar-check.sh" -s "$TMP/src.bin" -b "$TMP/rbackup/src.bin" -r n -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
   [[ "$output" == *"Prüfung erfolgreich"* ]]
 }
@@ -175,14 +158,12 @@ remote_teardown() {
   mkdir -p "$TMP/rbackup"
 
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rbackup" -m backup -c -r n -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
 
   # Quelle nachträglich verändern -> die Hashes dürfen nicht mehr passen
   printf 'XXXXXXXX' | dd of="$TMP/src.bin" bs=1 seek=1000 conv=notrunc status=none
 
   run "$REPO_ROOT/ddpar-check.sh" -s "$TMP/src.bin" -b "$TMP/rbackup/src.bin" -r n -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -ne 0 ]
   [[ "$output" == *"MISMATCH"* ]]
 }
@@ -199,16 +180,14 @@ remote_teardown() {
   mkdir -p "$TMP/rbackup"
 
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rbackup" -m backup -c -r c -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
   # Über netcat gehen die Rohdaten, komprimiert wird auf der Gegenseite
-  [[ "$output" == *"gzip -6 > "* ]]
+  gzip -t "${TMP}/rbackup/src.bin-0.gz"
   [ -f "$TMP/rbackup/src.bin-0.gz" ]
   [ ! -f "$TMP/rbackup/src.bin-0.part" ]
   grep -q "^COMPRESSION=1" "$TMP/rbackup/src.bin-metadata.txt"
 
   run "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/rbackup/src.bin" -o "$TMP/restored.bin" -r c -R "$REMOTE_TEST_HOST" -y
-  remote_teardown
   [ "$status" -eq 0 ]
   [[ "$output" == *"remote decompression"* ]]
 
@@ -224,13 +203,11 @@ remote_teardown() {
   mkdir -p "$TMP/rbackup"
 
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rbackup" -m backup -c -r c -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
 
   # Die .gz-Teile sind unabhängig davon, wo komprimiert wurde -> Restore mit
   # lokaler Dekompression muss dieselben Daten liefern
   run "$REPO_ROOT/ddpar-restore.sh" -i "$TMP/rbackup/src.bin" -o "$TMP/restored.bin" -r n -R "$REMOTE_TEST_HOST" -y
-  remote_teardown
   [ "$status" -eq 0 ]
 
   cmp "$TMP/src.bin" "$TMP/restored.bin"
@@ -246,10 +223,9 @@ remote_teardown() {
   mkdir -p "$TMP/rdest"
 
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rdest" -m clone -c -r c -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
   # Lokal komprimiert, die Gegenseite dekomprimiert vor dem Schreiben
-  [[ "$output" == *"gzip -dc | dd of="* ]]
+  [[ "$output" == *"| gzip -6 | nc "* ]]
 
   cmp "$TMP/src.bin" "$TMP/rdest/src.bin"
 }
@@ -262,7 +238,6 @@ remote_teardown() {
   mkdir -p "$TMP/rdest"
 
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rdest" -m clone -c -r n -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
   [[ "$output" == *"Kompression (-c) ist im Clone-Modus nur mit Remote-Modus 'c'"* ]]
 
@@ -277,11 +252,9 @@ remote_teardown() {
   mkdir -p "$TMP/rbackup"
 
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rbackup" -m backup -c -r c -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
 
   run "$REPO_ROOT/ddpar-check.sh" -s "$TMP/src.bin" -b "$TMP/rbackup/src.bin" -r c -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
   [[ "$output" == *"Prüfung erfolgreich"* ]]
 }
@@ -294,13 +267,53 @@ remote_teardown() {
   mkdir -p "$TMP/rbackup"
 
   run "$REPO_ROOT/ddpar.sh" -i "$TMP/src.bin" -o "$TMP/rbackup" -m backup -c -r c -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -eq 0 ]
 
   printf 'XXXXXXXX' | dd of="$TMP/src.bin" bs=1 seek=1000 conv=notrunc status=none
 
   run "$REPO_ROOT/ddpar-check.sh" -s "$TMP/src.bin" -b "$TMP/rbackup/src.bin" -r c -R "$REMOTE_TEST_HOST"
-  remote_teardown
   [ "$status" -ne 0 ]
   [[ "$output" == *"MISMATCH"* ]]
+}
+
+@test "Remote check propagates gzip CRC failure even when all raw bytes match" {
+  require_remote_support
+  require_remote_gzip
+  printf 'source bytes' > "${TMP}/src.bin"
+  mkdir "${TMP}/backup"
+  run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/src.bin" -o "${TMP}/backup" -m backup -c -r c -R "${REMOTE_TEST_HOST}" -j 1
+  [ "${status}" -eq 0 ]
+  local size
+  size=$(stat -c %s "${TMP}/backup/src.bin-0.gz")
+  printf '\000\000\000\000' | dd of="${TMP}/backup/src.bin-0.gz" bs=1 seek="$((size - 8))" conv=notrunc status=none
+  run "${REPO_ROOT}/ddpar-check.sh" -s "${TMP}/src.bin" -b "${TMP}/backup/src.bin" -r c -R "${REMOTE_TEST_HOST}"
+  [ "${status}" -ne 0 ]
+}
+
+@test "Remote checks with 12 segments do not exceed SSH MaxSessions" {
+  require_remote_support
+  make_testfile "${TMP}/src.bin" 1
+  mkdir "${TMP}/backup"
+  run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/src.bin" -o "${TMP}/backup" -m backup -r n -R "${REMOTE_TEST_HOST}" -j 12 -b 4096
+  [ "${status}" -eq 0 ]
+  run "${REPO_ROOT}/ddpar-check.sh" -s "${TMP}/src.bin" -b "${TMP}/backup/src.bin" -r n -R "${REMOTE_TEST_HOST}"
+  [ "${status}" -eq 0 ]
+}
+
+@test "Concurrent remote runs own separate SSH sockets and clean them up" {
+  require_remote_support
+  printf source > "${TMP}/src.bin"
+  mkdir "${TMP}/first" "${TMP}/second"
+  local before
+  before=$(find /tmp -maxdepth 1 -type d -name 'ddpar-ssh.*' | sort)
+  run bash -c '
+    "$1/ddpar.sh" -i "$2/src.bin" -o "$2/first" -r n -R "$3" -j 1 & a=$!
+    "$1/ddpar.sh" -i "$2/src.bin" -o "$2/second" -r n -R "$3" -j 1 & b=$!
+    wait "$a"; ra=$?; wait "$b"; rb=$?
+    [ "$ra" -eq 0 ] && [ "$rb" -eq 0 ]
+  ' bash "${REPO_ROOT}" "${TMP}" "${REMOTE_TEST_HOST}"
+  [ "${status}" -eq 0 ]
+  cmp "${TMP}/src.bin" "${TMP}/first/src.bin"
+  cmp "${TMP}/src.bin" "${TMP}/second/src.bin"
+  [ "$(find /tmp -maxdepth 1 -type d -name 'ddpar-ssh.*' | sort)" = "${before}" ]
 }

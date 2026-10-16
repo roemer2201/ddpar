@@ -1,12 +1,15 @@
 #!/bin/bash
 #
 # Restore segmented backups into a file or block device.
+# Version: 1.0.1 (2026-10-17)
 # Flow: read and validate metadata and parts; prepare the target; restore all
 # segments; collect local and remote worker results.
 
 # Fehler in zcat-/dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
 # sonst zählt nur der letzte Befehl (z.B. ein erfolgreiches dd of=...).
 set -o pipefail
+# shellcheck source=ddpar-common.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ddpar-common.sh" || exit 1
 
 # Set default input and output file names
 
@@ -18,14 +21,14 @@ REMOTE=0
 # "c" = netcat, Dekompression auf der Remote-Maschine
 REMOTE_MODE="n"
 REMOTE_HOST=""
-SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
+
 DEBUG=0
 ASSUME_YES=0
 SKIP_PREALLOC=0
 
 # Hilfemeldung anzeigen
 function show_help {
-  SCRIPT_NAME=$(basename "$0")
+  SCRIPT_NAME=$(basename -- "$0")
   echo "$SCRIPT_NAME - Ein Bash-Skript zur Verarbeitung von Parametern"
   echo "Verwendung: $SCRIPT_NAME [Optionen]"
   echo ""
@@ -41,16 +44,20 @@ function show_help {
   echo "-R user@host            Angabe des Remote-Host, auf dem das Backup liegt"
   echo "-y                      Sicherheitsabfrage überspringen (assume yes)"
   echo "-P                      Vorab-Reservierung des Zielplatzes (fallocate) überspringen"
+  echo "DDPAR_NETWORK_TIMEOUT: netcat inactivity timeout in seconds (default: 300)."
   echo "-h, --help              Diese Hilfe anzeigen"
   echo ""
   echo "Die Anzahl der Jobs und Blockgröße kann nicht geändert werden. Sie wird beim Erstellen des Abbildes festgelegt."
 }
 
+# Normalize aliases while preserving literal option values.
+ddpar_normalize_args "$@"
+set -- "${DDPAR_ARGS[@]}"
 # Verwendung von getopts zur Verarbeitung der Optionen
 while getopts ":i:o:r::R:yPh" opt; do
   case $opt in
-    i|-input) INPUT="$OPTARG";;
-    o|-output) OUTPUT="$OPTARG";;
+    i) INPUT="$OPTARG";;
+    o) OUTPUT="$OPTARG";;
     y) ASSUME_YES=1;;
     P) SKIP_PREALLOC=1;;
     r)
@@ -61,8 +68,8 @@ while getopts ":i:o:r::R:yPh" opt; do
         n|"") REMOTE_MODE="n";;
         c)    REMOTE_MODE="c";;
         l)
-          REMOTE_MODE="n"
-          echo "[WARN] Remote-Modus 'l' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat."
+          echo "Error: encrypted mode l is not implemented; refusing plaintext transfer." >&2
+          exit 2
           ;;
         -*)
           # "-r" ohne Modus: getopts hat bereits die nächste Option als Argument
@@ -82,8 +89,8 @@ while getopts ":i:o:r::R:yPh" opt; do
         REMOTE_HOST="${OPTARG}"
       fi
       ;;
-    h|-help) show_help; exit 1;;
-    \?) echo "Ungültige Option: -$OPTARG";;
+    h) show_help; exit 0;;
+    \?) echo "Unknown option: -${OPTARG}" >&2; exit 2;;
     :)
       # -r darf ohne Argument stehen (Default-Modus n), alle anderen Optionen nicht
       if [ "$OPTARG" = "r" ]; then
@@ -96,79 +103,18 @@ while getopts ":i:o:r::R:yPh" opt; do
       ;;
   esac
 done
+shift "$((OPTIND - 1))"
+if [ "$#" -ne 0 ]; then
+  echo "Error: unexpected argument: ${1}" >&2
+  exit 2
+fi
 
 
-function establish_ssh_connection {
-  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  local target=$1
-  local control_path=$2
-  local password=$3
-  if [ -n "$password" ]; then
-    if ! which sshpass > /dev/null; then
-      echo "Der Befehl \"sshpass\" existiert nicht. Bitte installieren Sie das entsprechende Paket über ihren Paketmanager."
-      exit 1
-    fi
-    SSHPASS="$password" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
-  else
-    echo "Verbindungsaufbau mit Sockel ${control_path} zu ${target}"
-    ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
-  fi
-  return $?
-}
 
-function is_ssh_socket_alive {
-  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  ssh -o ControlPath="${SSH_SOCKET_PATH}" -O check "${REMOTE_HOST}" 2>/dev/null
-  return $?
-}
 
-function connect_ssh {
-  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  if [ -z "${REMOTE_HOST}" ]; then
-    echo "Fehler: Kein Remote-Host angegeben."
-    exit 1
-  fi
-  if is_ssh_socket_alive; then
-    echo "SSH-Verbindung zu ${REMOTE_HOST} besteht bereits."
-    return 0
-  fi
-  output=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_HOST} true 2>&1)
-  if [[ $? -eq 0 ]]; then
-    echo "Passwortloser Verbindungsaufbau war erfolgreich."
-    establish_ssh_connection "${REMOTE_HOST}" "${SSH_SOCKET_PATH}"
-  elif echo "$output" | grep -q "Permission denied"; then
-    echo "Host ist erreichbar, aber passwortlose Authentifizierung fehlgeschlagen."
-    echo -n "Bitte geben Sie das SSH-Passwort für ${REMOTE_HOST} ein: "
-    read -s USER_PASSWORD
-    echo
-    establish_ssh_connection "${REMOTE_HOST}" "${SSH_SOCKET_PATH}" "$USER_PASSWORD"
-    if [ $? -ne 0 ]; then
-      echo "Verbindung zu ${REMOTE_HOST} konnte nicht hergestellt werden."
-      exit 1
-    fi
-  else
-    echo "Unbekannter Fehler oder Host nicht erreichbar. Ausgabe:"
-    echo "$output"
-  fi
-  echo "SSH-Verbindung zu ${REMOTE_HOST} wurde erfolgreich aufgebaut."
-}
 
-function execute_remote_command {
-  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  local command=$1
-  if [ -z "${command}" ]; then
-    echo "Fehler: Kein Befehl zum Ausführen angegeben."
-    return 1
-  fi
-  ssh -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "${command}"
-  return $?
-}
 
 # Quote one path or command string for the remote login shell.
-function shell_quote {
-  local escaped="${1//\'/\'\\\'\'}"
-  printf "'%s'" "${escaped}"
-}
 
 function execute_remote_background_command {
   [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
@@ -184,7 +130,7 @@ function execute_remote_background_command {
   # Statusverzeichnis ab; wait_for_jobs() fragt sie spaeter ab.
   ensure_remote_status_dir || return 1
   REMOTE_JOB_BASE="${REMOTE_STATUS_DIR}/job${#REMOTE_JOB_BASES[@]}-${CURRENT_REMOTE_PORT}"
-  execute_remote_command "nohup bash -c $(shell_quote "${REMOTE_JOB_WRAPPER}") ddpar-job $(shell_quote "${command}") $(shell_quote "${REMOTE_JOB_BASE}") < /dev/null > $(shell_quote "${REMOTE_JOB_BASE}.log") 2>&1 &"
+  execute_remote_command "nohup setsid bash -c $(shell_quote "${REMOTE_JOB_WRAPPER}") ddpar-job $(shell_quote "${command}") $(shell_quote "${REMOTE_JOB_BASE}") < /dev/null > $(shell_quote "${REMOTE_JOB_BASE}.log") 2>&1 &"
 }
 
 # Wrapper fuer Remote-Pipelines: $1 = Pipeline, $2 = Basisname der Statusdateien.
@@ -205,19 +151,15 @@ function ensure_remote_status_dir {
 
 # Gibt "rc <n>", "running" oder "missing" fuer einen Remote-Job aus. Der zweite
 # rc-Test faengt einen Job ab, der zwischen den ersten beiden Tests endet.
-function remote_job_state {
-  local q
-  q=$(shell_quote "$1")
-  execute_remote_command "if [ -f ${q}.rc ]; then echo rc \$(cat ${q}.rc); elif [ -f ${q}.pid ] && kill -0 \$(cat ${q}.pid) 2>/dev/null; then echo running; elif [ -f ${q}.rc ]; then echo rc \$(cat ${q}.rc); else echo missing; fi"
-}
 
-# Beendet die nc-Prozesse auf den uebergebenen Remote-Ports. Der Anker ^...$
-# trifft nur nc selbst, nicht die Wrapper-Shells, damit diese noch den
-# Exit-Status ablegen koennen.
+# Stop only process groups recorded in this run's private status directory.
+# Earlier cleanup matched nc by its port to avoid killing unrelated shells;
+# group ownership now lets us stop dd/gzip too without name-based matching.
 function stop_remote_listeners {
-  local port
-  for port in "$@"; do
-    execute_remote_command "pkill -f '^nc -N -l ${port}\$'" > /dev/null 2>&1
+  local base q
+  for base in "${REMOTE_JOB_BASES[@]}"; do
+    q=$(shell_quote "${base}")
+    execute_remote_command "if [ ! -f ${q}.rc ] && [ -f ${q}.pid ]; then kill -TERM -- -\$(cat ${q}.pid) 2>/dev/null; printf '143\\n' > ${q}.rc; fi" || true
   done
 }
 
@@ -227,13 +169,6 @@ function remove_remote_status_dir {
   REMOTE_STATUS_DIR=""
 }
 
-function close_ssh_connection {
-  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  ssh -S "${SSH_SOCKET_PATH}" -O exit "${REMOTE_HOST}"
-  if [ $? -ne 0 ]; then
-    echo "Warnung: Fehler beim Schließen der SSH-Verbindung zu ${REMOTE_HOST}."
-  fi
-}
 
 function remote_port_generation {
   [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
@@ -242,15 +177,10 @@ function remote_port_generation {
 }
 
 function check_remote_port_availability {
-  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  # Anker [^0-9], damit z.B. Port 1234 nicht auf einen belegten Port 12345 matcht
-  execute_remote_command "ss -tln | grep -qE \":${CURRENT_REMOTE_PORT}[^0-9]\""
-  if [[ $? != 0 ]]; then
-    return 0
-  else
-    [ "$DEBUG" -eq 1 ] && echo "Port ${CURRENT_REMOTE_PORT} bereits in Benutzung."
-    return 1
-  fi
+  local listeners
+  listeners=$(execute_remote_command "ss -H -tln") || return 2
+  if grep -qE ":${CURRENT_REMOTE_PORT}[^0-9]" <<< "${listeners}"; then return 1; fi
+  return 0
 }
 
 function remote_restore_commands {
@@ -263,14 +193,15 @@ function remote_restore_commands {
   if [ -z "${REMOTE_PORT}" ]; then
     remote_port_generation
   fi
-  CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
+  CURRENT_REMOTE_PORT=$((10000 + (REMOTE_PORT - 10000 + PART_NUM) % 32768))
   while true; do
     if check_remote_port_availability; then
       break
     else
+      [ "$?" -eq 2 ] && return 1
       echo "Port ${CURRENT_REMOTE_PORT} on remote machine already in use, generate new port."
       remote_port_generation
-      CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
+      CURRENT_REMOTE_PORT=$((10000 + (REMOTE_PORT - 10000 + PART_NUM) % 32768))
     fi
   done
 
@@ -335,7 +266,7 @@ function wait_for_jobs {
       failed=$((failed + 1))
     fi
   done
-  if [ "${#JOB_PIDS[@]}" -eq 0 ]; then
+  if [ "${#JOB_PIDS[@]}" -ne "${NUM_JOBS}" ]; then
     echo "Fehler: Es wurde kein Restore-Job gestartet." >&2
     failed=$((failed + 1))
   fi
@@ -383,24 +314,7 @@ function wait_for_jobs {
   return 0
 }
 
-function cleanup_on_signal {
-  trap - INT TERM
-  echo "Abbruch: Beende laufende Teil-Prozesse ..." >&2
-  local pids
-  pids=$(jobs -p)
-  if [ -n "$pids" ]; then
-    # shellcheck disable=SC2086 # PIDs sind whitespace-getrennt gewollt
-    kill $pids 2>/dev/null
-    wait $pids 2>/dev/null
-  fi
-  if [ $REMOTE -eq 1 ] && is_ssh_socket_alive; then
-    stop_remote_listeners "${REMOTE_LISTENER_PORTS[@]}"
-    remove_remote_status_dir
-    close_ssh_connection
-  fi
-  exit 130
-}
-trap cleanup_on_signal INT TERM
+trap ddpar_cancel INT TERM
 
 function part_bytes {
   # Bytes, die Teil $1 enthält: normale Teile SPLIT_SIZE, der letzte Teil
@@ -420,9 +334,13 @@ function part_bytes {
 
 function restore_split_image {
   echo "Starte die Prozesse ..."
-  if [[ ${OUTPUT_FILE_TYPE} != "block special"* ]]; then
+  if [ ! -b "${OUTPUT_FILE}" ]; then
+    # conv=notrunc protects parallel workers, so truncate exactly once up front.
+    truncate -s "${INPUT_SIZE}" -- "${OUTPUT_FILE}" || { INTERNAL_EXITCODE=1; return 1; }
     if [ "$SKIP_PREALLOC" -eq 1 ]; then
       echo "Vorab-Reservierung des Zielplatzes übersprungen (-P)."
+    elif [ "${INPUT_SIZE}" -eq 0 ]; then
+      : # fallocate rejects zero length; the empty file is already complete.
     elif ! command -v fallocate > /dev/null; then
       echo "Warnung: fallocate ist nicht verfügbar, Vorab-Reservierung wird übersprungen."
     else
@@ -443,7 +361,7 @@ function restore_split_image {
     # Byte-genaue dd-Aufrufe (count_bytes/seek_bytes), damit auch nicht glatt
     # teilbare Backups funktionieren. Direkte Pipelines statt eval-Strings:
     # Pfade mit Leerzeichen o.ä. sind so ungefährlich.
-    dd_out=(dd of="${OUTPUT_FILE}" bs="${BLOCKSIZEBYTES}" iflag=fullblock,count_bytes count="${COUNT_BYTES}" oflag=seek_bytes seek="${START}" conv=notrunc)
+    dd_out=(dd of="${OUTPUT_FILE}" bs="${BLOCKSIZEBYTES}" "iflag=fullblock,count_bytes" count="${COUNT_BYTES}" oflag=seek_bytes seek="${START}" conv=notrunc)
     if [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ] && [ "$REMOTE_MODE" = "c" ]; then
       # Remote netcat restore mit Dekompression auf der Gegenseite (-r c): der
       # Remote-Host packt die .gz-Teile selbst aus und sendet die Rohdaten, hier
@@ -452,13 +370,13 @@ function restore_split_image {
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is remote (compressed, remote decompression)"
       fi
-      if ! remote_restore_commands "zcat $(shell_quote "${INPUT_FILES}${PART_NUM}.gz")"; then
+      if ! remote_restore_commands "gzip -dc -- $(shell_quote "${INPUT_FILES}${PART_NUM}.gz")"; then
         echo "Remote-Restore-Sender für Teil ${PART_NUM} konnte nicht gestartet werden."
         INTERNAL_EXITCODE=1
         break
       fi
-      echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | ${dd_out[*]}"
-      nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" </dev/null | "${dd_out[@]}" &
+      echo "nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT} </dev/null | ${dd_out[*]}"
+      nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" </dev/null | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
     elif [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ]; then
       # Remote netcat restore mit lokaler Dekompression: der Remote-Host sendet
       # die .gz-Datei unverändert, zcat läuft auf DIESER Maschine. Über das Netz
@@ -471,8 +389,8 @@ function restore_split_image {
         INTERNAL_EXITCODE=1
         break
       fi
-      echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | zcat | ${dd_out[*]}"
-      nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" </dev/null | zcat | "${dd_out[@]}" &
+      echo "nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT} </dev/null | zcat | ${dd_out[*]}"
+      nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" </dev/null | zcat | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
     elif [ $REMOTE -eq 1 ]; then
       # Remote netcat restore, unkomprimiert: Remote sendet, lokal wird empfangen und geschrieben
       if [ $PART_NUM -eq 0 ]; then
@@ -483,25 +401,30 @@ function restore_split_image {
         INTERNAL_EXITCODE=1
         break
       fi
-      echo "nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT} </dev/null | ${dd_out[*]}"
-      nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" </dev/null | "${dd_out[@]}" &
-    elif [ ! -z "$COMPRESSION" ]; then
+      echo "nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT} </dev/null | ${dd_out[*]}"
+      nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" </dev/null | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
+    elif [ -n "$COMPRESSION" ]; then
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is compressed"
       fi
       echo "zcat ${INPUT_FILES}${PART_NUM}.gz | ${dd_out[*]}"
-      zcat "${INPUT_FILES}${PART_NUM}.gz" | "${dd_out[@]}" &
+      gzip -dc -- "${INPUT_FILES}${PART_NUM}.gz" | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
     else
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is uncompressed"
       fi
       echo "dd if=${INPUT_FILES}${PART_NUM}.part bs=${BLOCKSIZEBYTES} iflag=fullblock | ${dd_out[*]}"
-      dd if="${INPUT_FILES}${PART_NUM}.part" bs="${BLOCKSIZEBYTES}" iflag=fullblock | "${dd_out[@]}" &
+      dd if="${INPUT_FILES}${PART_NUM}.part" bs="${BLOCKSIZEBYTES}" iflag=fullblock | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
     fi
     register_job $! "Teil ${PART_NUM} (restore)"
   done
 }
 
+
+if [ -z "${INPUT:-}" ] || [ -z "${OUTPUT:-}" ]; then
+  echo 'Error: input (-i) and output (-o) are required.' >&2
+  exit 2
+fi
 
 # Create spinoff variables
 INPUT_PATH=$(dirname -- "${INPUT}")
@@ -510,7 +433,7 @@ INPUT_FILES="${INPUT_PATH}/${INPUT_FILE_BASENAME}-"
 #OUTPUT_PATH=/dev
 #OUTPUT_FILE_BASENAME=sdi
 #OUTPUT_FILE="${OUTPUT_PATH}/${OUTPUT_FILE_BASENAME}"
-OUTPUT_FILE_TYPE="$(file -b -- "${OUTPUT}")"
+OUTPUT_FILE_TYPE="$(file -Lb -- "${OUTPUT}")"
 METADATA_FILE="${INPUT_FILES}metadata.txt"
 
 # Get parameters from metadata file (lokal oder remote)
@@ -521,7 +444,7 @@ if [ $REMOTE -eq 1 ]; then
       exit 1
     fi
   done
-  connect_ssh
+  connect_ssh || exit 1
   METADATA_SRC=$(mktemp)
   execute_remote_command "cat -- $(shell_quote "${METADATA_FILE}")" > "${METADATA_SRC}" 2>/dev/null
   if [ ! -s "$METADATA_SRC" ]; then
@@ -537,27 +460,7 @@ else
     exit 1
   fi
 fi
-NUM_JOBS=$(grep "^NUM_JOBS=" "$METADATA_SRC" | cut -d "=" -f 2)
-FILE_NAME=$(grep "^FILE_NAME=" "$METADATA_SRC" | cut -d "=" -f 2)
-SPLIT_SIZE=$(grep "^SPLIT_SIZE=" "$METADATA_SRC" | cut -d "=" -f 2)
-INPUT_SIZE=$(grep "^INPUT_SIZE=" "$METADATA_SRC" | cut -d "=" -f 2)
-INPUT_FILE_TYPE=$(grep "^FILE_TYPE=" "$METADATA_SRC" | cut -d "=" -f 2)
-BLOCKSIZEBYTES=$(grep "^BLOCKSIZEBYTES=" "$METADATA_SRC" | cut -d "=" -f 2)
-COMPRESSION=$(grep "^COMPRESSION=" "$METADATA_SRC" | cut -d "=" -f 2)
-COMPRESSION_LEVEL=$(grep "^COMPRESSION_LEVEL=" "$METADATA_SRC" | cut -d "=" -f 2)
-
-# Aeltere Metadatendateien ohne INPUT_SIZE: glatte Teilung annehmen (wie
-# ddpar-check.sh). Erst nach Pruefung der Operanden rechnen, da Bash-Arithmetik
-# beliebige Strings als Ausdruck auswertet.
-if [ -z "${INPUT_SIZE}" ] && [[ "${SPLIT_SIZE}" =~ ^[1-9][0-9]*$ && "${NUM_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
-  INPUT_SIZE=$((SPLIT_SIZE * NUM_JOBS))
-fi
-
-if ! [[ "${NUM_JOBS}" =~ ^[1-9][0-9]*$ && "${BLOCKSIZEBYTES}" =~ ^[1-9][0-9]*$ &&
-        "${INPUT_SIZE}" =~ ^[0-9]+$ && "${SPLIT_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Fehler: Ungültige oder unvollständige numerische Backup-Metadaten." >&2
-  exit 1
-fi
+ddpar_read_metadata "${METADATA_SRC}" || exit 1
 
 if [ $REMOTE -eq 1 ] && [ "$REMOTE_MODE" = "c" ] && [ -z "$COMPRESSION" ]; then
   echo "[WARN] Remote-Modus 'c' bei unkomprimiertem Backup: es wird nichts dekomprimiert, die Übertragung entspricht Modus 'n'."
@@ -598,25 +501,29 @@ for ((part=0; part<NUM_JOBS; part++)); do
     part_file="${INPUT_FILES}${part}.part"
   fi
   if [ "${REMOTE}" -eq 1 ]; then
-    if ! execute_remote_command "test -r $(shell_quote "${part_file}")"; then
-      echo "Fehler: Remote-Teil ${part_file} fehlt oder ist nicht lesbar." >&2
-      exit 1
+    if [ -n "${COMPRESSION}" ]; then
+      if [ "${REMOTE_MODE}" = c ]; then
+        part_size=$(execute_remote_command "gzip -dc -- $(shell_quote "${part_file}") | wc -c") || exit 1
+      else
+        part_size=$(execute_remote_command "cat -- $(shell_quote "${part_file}")" | gzip -dc | wc -c) || exit 1
+      fi
+    else
+      part_size=$(execute_remote_command "test -f $(shell_quote "${part_file}") && stat -Lc %s -- $(shell_quote "${part_file}")") || exit 1
     fi
-    if [ -z "${COMPRESSION}" ]; then
-      part_size=$(execute_remote_command "stat -c %s -- $(shell_quote "${part_file}")") || exit 1
+    if [ "${part_size}" -ne "$(part_bytes "${part}")" ]; then
+      echo "Error: remote part ${part_file} has an unexpected length." >&2
+      exit 1
     fi
   else
-    if [ ! -r "${part_file}" ]; then
-      echo "Fehler: ${part_file} fehlt oder ist nicht lesbar." >&2
-      exit 1
+    ddpar_verify_part "${part_file}" "$(part_bytes "${part}")" || exit 1
+    if [ -e "${INPUT_FILES}${part}.sha256" ]; then
+      expected=$(ddpar_checksum "${INPUT_FILES}${part}.sha256") || exit 1
+      actual=$(ddpar_part_stream "${part_file}" | sha256sum | cut -d' ' -f1) || exit 1
+      if [ "${expected}" != "${actual}" ]; then
+        echo "Error: backup checksum mismatch: ${part_file}" >&2
+        exit 1
+      fi
     fi
-    if [ -z "${COMPRESSION}" ]; then
-      part_size=$(stat -c %s -- "${part_file}") || exit 1
-    fi
-  fi
-  if [ -z "${COMPRESSION}" ] && [ "${part_size}" -ne "$(part_bytes "${part}")" ]; then
-    echo "Fehler: Teil ${part_file} hat ${part_size} Bytes statt der erwarteten $(part_bytes "${part}") Bytes." >&2
-    exit 1
   fi
 done
 
@@ -628,7 +535,7 @@ fi
 
 if [ -e "${OUTPUT}" ]; then
   # Determine the type of the output
-  OUTPUT_FILE_TYPE=$(file -b -- "${OUTPUT}")
+  OUTPUT_FILE_TYPE=$(file -Lb -- "${OUTPUT}")
   # Use the appropriate command to determine destination types and sizes
   case "$OUTPUT_FILE_TYPE" in
     # Wenn OUTPUT_FILE ein Blockdevice ist, prüfen, ob OUTPUT_FILE groß genug ist.
@@ -652,7 +559,7 @@ if [ -e "${OUTPUT}" ]; then
       ;;
     # Wenn OUTPUT eine Datei ist (die bereits exitiert), prüfen, ob genügend freier Speicherplatz vorhanden ist.
     *)
-      OUTPUT_DIR=$(dirname "$OUTPUT")
+      OUTPUT_DIR=$(dirname -- "$OUTPUT")
       OUTPUT_FILE="$OUTPUT"
       AVAILABLE_SPACE=$(df -B 1 "$OUTPUT_DIR" | awk 'NR==2{print $4}')
       if [ ! "$AVAILABLE_SPACE" -ge "$INPUT_SIZE" ]; then
@@ -663,7 +570,7 @@ if [ -e "${OUTPUT}" ]; then
   esac
 else
   # Wenn OUTPUT eine Datei ist (die nicht exitiert), prüfen, ob genügend freier Speicherplatz vorhanden ist.
-  OUTPUT_DIR=$(dirname "$OUTPUT")
+  OUTPUT_DIR=$(dirname -- "$OUTPUT")
   OUTPUT_FILE="$OUTPUT"
   AVAILABLE_SPACE=$(df -B 1 "$OUTPUT_DIR" | awk 'NR==2{print $4}')
     if [ ! "$AVAILABLE_SPACE" -ge "$INPUT_SIZE" ]; then
@@ -671,12 +578,33 @@ else
       exit 1
     fi
   if [ -w "$OUTPUT_DIR" ]; then
-    touch "$OUTPUT"
+    : # Create the target only after confirmation and validation.
   else
     echo "Fehler: Kein Schreibzugriff auf das Verzeichnis $OUTPUT_DIR vorhanden."
     exit 1
   fi
 
+fi
+
+# Resolve the final destination, including symlinks, before preallocation.
+if [ -e "${OUTPUT_FILE}" ]; then
+  if [ ! -f "${OUTPUT_FILE}" ] && [ ! -b "${OUTPUT_FILE}" ]; then
+    echo "Error: unsupported restore target: ${OUTPUT_FILE}" >&2
+    exit 1
+  fi
+  OUTPUT_FILE_TYPE=$(file -Lb -- "${OUTPUT_FILE}") || exit 1
+  if [ -b "${OUTPUT_FILE}" ]; then
+    OUTPUT_SIZE=$(blockdev --getsize64 "${OUTPUT_FILE}") || exit 1
+    [ "${OUTPUT_SIZE}" -ge "${INPUT_SIZE}" ] || exit 1
+  fi
+fi
+if [ "${REMOTE}" -ne 1 ]; then
+  for part_file in "${METADATA_FILE}" "${INPUT_FILES}"*.part "${INPUT_FILES}"*.gz "${INPUT_FILES}"*.sha256; do
+    if [ "${OUTPUT_FILE}" -ef "${part_file}" ]; then
+      echo "Error: restore target aliases the backup: ${part_file}" >&2
+      exit 1
+    fi
+  done
 fi
 
 # Schreibrechte vorab prüfen, damit der Restore nicht erst mitten im
@@ -686,8 +614,8 @@ if [ -e "$OUTPUT_FILE" ]; then
     echo "Fehler: Keine Schreibrechte auf $OUTPUT_FILE."
     exit 1
   fi
-elif [ ! -w "$(dirname "$OUTPUT_FILE")" ]; then
-  echo "Fehler: Keine Schreibrechte auf das Verzeichnis $(dirname "$OUTPUT_FILE")."
+elif [ ! -w "$(dirname -- "$OUTPUT_FILE")" ]; then
+  echo "Fehler: Keine Schreibrechte auf das Verzeichnis $(dirname -- "$OUTPUT_FILE")."
   exit 1
 fi
 
@@ -697,7 +625,7 @@ if [ "$ASSUME_YES" -eq 1 ]; then
   restore_split_image
 else
   while true; do
-    read -p "Möchten Sie fortfahren [y/N]? " choice
+    read -r -p "Möchten Sie fortfahren [y/N]? " choice || choice=n
     case "$choice" in
       y|Y)
         echo "Beginning to restore ..."

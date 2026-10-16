@@ -1,12 +1,15 @@
 #!/bin/bash
 #
 # Clone or back up files and block devices in parallel segments.
+# Version: 1.0.1 (2026-10-17)
 # Flow: validate options and endpoints; calculate segments; run local or remote
 # workers; collect every worker's result before reporting success.
 
 # Fehler in dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
 # sonst zählt nur der letzte Befehl (z.B. ein erfolgreiches dd of=...).
 set -o pipefail
+# shellcheck source=ddpar-common.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ddpar-common.sh" || exit 1
 
 # Standardwerte für die Parameter
 INPUT_FILE=""
@@ -21,14 +24,14 @@ REMOTE=0
 # "c" = netcat, [De]Kompression auf der Remote-Maschine
 REMOTE_MODE="n"
 #SSH_SOCKET_PATH="/tmp/ssh_mux_%n_%p_%r"
-SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
+
 INTERNAL_EXITCODE=0
 DEBUG=0
 
 
 # Hilfemeldung anzeigen
 function show_help {
-  SCRIPT_NAME=$(basename "$0")
+  SCRIPT_NAME=$(basename -- "$0")
   echo "$SCRIPT_NAME - Ein Bash-Skript zum parallelen Klonen oder Sichern von Blockgeräten oder großen Dateien"
   echo "Verwendung: $SCRIPT_NAME [Optionen]"
   echo ""
@@ -46,7 +49,8 @@ function show_help {
   echo "-f                      Force - ignore Probleme und erzwinge den Vorgang"
   echo "-r [lnc]                Remote-Verbindung, nur SSH möglich. Remote-Optionen: siehe unten"
   echo "-R user@host            Angabe des Remote-Host"
-  echo "-h                      Diese Hilfe anzeigen"
+  echo "-h, --help              Diese Hilfe anzeigen"
+  echo "DDPAR_NETWORK_TIMEOUT: netcat inactivity timeout in seconds (default: 300)."
   echo "-d                      Debug Modus"
   echo ""
   echo "Remote-Optionen:"
@@ -61,6 +65,9 @@ function show_help {
 }
 
 function option_analysis {
+  # Normalize aliases while preserving literal option values.
+  ddpar_normalize_args "$@"
+  set -- "${DDPAR_ARGS[@]}"
   # Verwendung von getopts zur Verarbeitung der Optionen
   echo "Analysiere gegebene Optionen \"$*\""
   while getopts ":i:o:m:j:b:n:r::R:csfhd" opt; do
@@ -93,7 +100,7 @@ function option_analysis {
 		set -x
 		#PS4="${SETXCOLOR}>> ${LINENO}: ${NOCOLOR}"
 		#PS4="${SETXCOLOR} ${NOCOLOR}"
-		PS4="${SETXCOLOR}$(printf "%*s" "$SHLVL" | tr " " "+") ${NOCOLOR}"
+		PS4="${SETXCOLOR}$(printf "%*s" "${SHLVL}" "" | tr " " "+") ${NOCOLOR}"
 		echo -e "${WARNCOLOR}[WARN] DEBUG mode enabled, passwords get printed as clear text!${NOCOLOR}"
 		;;
 	  s)
@@ -106,13 +113,13 @@ function option_analysis {
         REMOTE=1
         # "n" = netcat, [De]Kompression lokal; "c" = netcat, [De]Kompression
         # auf der Remote-Maschine. "l" (Datenkanal verschlüsselt) ist geplant —
-        # hier ehrlich warnen statt still zurückzufallen.
+        # Reject the unsupported encrypted mode before any transfer.
         case "${OPTARG}" in
           n|"") REMOTE_MODE="n";;
           c)    REMOTE_MODE="c";;
           l)
-            REMOTE_MODE="n"
-            echo -e "${WARNCOLOR}[WARN] Remote-Modus 'l' ist noch nicht implementiert. Es wird 'n' verwendet: Datenübertragung unverschlüsselt über netcat.${NOCOLOR}"
+            echo "Error: encrypted mode l is not implemented; refusing plaintext transfer." >&2
+            exit 2
             ;;
           -*)
             # "-r" ohne Modus: getopts hat bereits die nächste Option als
@@ -148,12 +155,29 @@ function option_analysis {
     esac
   done
 
-  if ! [[ "${NUM_JOBS}" =~ ^[1-9][0-9]*$ ]] ||
-     ! [[ "${BLOCKSIZEBYTES}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Fehler: -j und -b müssen positive ganze Zahlen sein." >&2
+  shift "$((OPTIND - 1))"
+  if [ "$#" -ne 0 ]; then
+    echo "Error: unexpected argument: ${1}" >&2
     exit 2
   fi
-
+  ddpar_geometry || { echo 'Fehler: -j und -b müssen positive ganze Zahlen sein.' >&2; exit 2; }
+  case "${MODE}" in
+    clone|backup) ;;
+    *) echo "Error: invalid mode: ${MODE}" >&2; exit 2 ;;
+  esac
+  case "${COMPRESSION}" in
+    0|1) ;;
+    *) echo 'Error: COMPRESSION must be 0 or 1.' >&2; exit 2 ;;
+  esac
+  case "${CHECKSUM}" in
+    0|1) ;;
+    *) echo 'Error: CHECKSUM must be 0 or 1.' >&2; exit 2 ;;
+  esac
+  COMPRESSION_LEVEL="${COMPRESSION_LEVEL:-6}"
+  if ! [[ "${COMPRESSION_LEVEL}" =~ ^[1-9]$ ]]; then
+    echo 'Error: COMPRESSION_LEVEL must be between 1 and 9.' >&2
+    exit 2
+  fi
   # Überprüfung der erforderlichen Parameter
   if [ -z "${INPUT}" ] || [ -z "${OUTPUT}" ] ; then
     echo -e "${ERRORCOLOR}Fehlende Parameter. Bitte geben Sie alle erforderlichen Parameter --input und --output an.${NOCOLOR}"
@@ -179,7 +203,7 @@ function set_colors {
         # see if it supports colors...
         ncolors=$(tput colors)
 
-        if test -n "$ncolors" && test $ncolors -ge 8; then
+        if test -n "$ncolors" && test "${ncolors}" -ge 8; then
 			# I* heißt "intense"
 			# B* heißt "bold"
 			# BI* heißt "bold intense"
@@ -206,79 +230,10 @@ function set_colors {
 	fi
 }
 
-function establish_ssh_connection {
-	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    local target=$1
-    local control_path=$2
-    local password=$3
 
-    # Wenn ein Passwort bereitgestellt wird, verwenden Sie es, um sich per SSH zu verbinden.
-    if [ -n "$password" ]; then
-        if ! which sshpass > /dev/null; then
-          echo -e "${ERRORCOLOR}Der Befehl \"sshpass\" existiert nicht. Bitte installieren Sie das entsprechende Paket ueber ihren Paketmanager${NOCOLOR}"
-          exit 1
-        fi
-        SSHPASS="$password" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
-    else
-        echo -e "${INFOCOLOR}Verbindungsaufbau mit Sockel ${control_path} zu ${target}${NOCOLOR}"
-        ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
-    fi
 
-    return $?
-}
-
-function connect_ssh {
-	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    if [ -z "${REMOTE_HOST}" ]; then
-        echo -e "${ERRORCOLOR}Fehler: Kein Remote-Host angegeben.${NOCOLOR}"
-        exit 1
-    fi
-
-    # Wenn ein Socket bereits existiert und funktioniert, dann frühzeitig aussteigen
-    if is_ssh_socket_alive; then
-        echo -e "${INFOCOLOR}SSH-Verbindung zu ${REMOTE_HOST} besteht bereits.${NOCOLOR}"
-        return 0
-    fi
-
-    # Prüfen, ob der Host per SSH erreichbar ist
-    output=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_HOST} true 2>&1)
-    
-    # Überprüfung des Exit Codes und der Ausgabe
-    if [[ $? -eq 0 ]]; then
-        echo -e "${SUCCESSCOLOR}Passwortloser Verbindungsaufbau war erfolgreich.${NOCOLOR}"
-        establish_ssh_connection "${REMOTE_HOST}" "${SSH_SOCKET_PATH}"
-    elif echo "$output" | grep -q "Permission denied"; then
-        echo -e "${ERRORCOLOR}Host ist erreichbar, aber passwortlose Authentifizierung fehlgeschlagen.${NOCOLOR}"
-        # Passwort vom Nutzer abfragen
-        echo -en "${REQUESTCOLOR}Bitte geben Sie das SSH-Passwort für ${REMOTE_HOST} ein: ${NOCOLOR}"
-        read -s USER_PASSWORD
-        echo
-
-        establish_ssh_connection "${REMOTE_HOST}" "${SSH_SOCKET_PATH}" "$USER_PASSWORD"
-        if [ $? -ne 0 ]; then
-            echo -e "${ERRORCOLOR}Verbindung zu ${REMOTE_HOST} konnte nicht hergestellt werden.${NOCOLOR}"
-            exit 1
-        fi
-    else
-        echo -e "${ERRORCOLOR}Unbekannter Fehler oder Host nicht erreichbar. Ausgabe:${NOCOLOR}"
-        echo "$output"
-    fi
-
-    echo -e "${SUCCESSCOLOR}SSH-Verbindung zu ${REMOTE_HOST} wurde erfolgreich aufgebaut.${NOCOLOR}"
-}
-
-function is_ssh_socket_alive {
-	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    # Überprüft, ob ein funktionierender Socket bereits existiert
-    ssh -o ControlPath="${SSH_SOCKET_PATH}" -O check "${REMOTE_HOST}" 2>/dev/null
-    return $?
-}
 
 # Quote one argument for the remote login shell, without interpreting its data.
-function shell_quote {
-	local escaped="${1//\'/\'\\\'\'}"
-	printf "'%s'" "${escaped}"
-}
 
 # Run a command locally as an argv array or remotely with quoted arguments.
 function execute_command {
@@ -293,19 +248,6 @@ function execute_command {
 	fi
 }
 
-function execute_remote_command {
-	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    local command=$1
-
-    if [ -z "${command}" ]; then
-        echo -e "${ERRORCOLOR}Fehler: Kein Befehl zum Ausführen angegeben.${NOCOLOR}"
-        return 1
-    fi
-
-    ssh -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "${command}"
-    
-    return $?
-}
 
 function execute_remote_background_command {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
@@ -323,7 +265,7 @@ function execute_remote_background_command {
     # Statusverzeichnis ab; wait_for_jobs() fragt sie spaeter ab.
     ensure_remote_status_dir || return 1
     REMOTE_JOB_BASE="${REMOTE_STATUS_DIR}/job${#REMOTE_JOB_BASES[@]}-${CURRENT_REMOTE_PORT}"
-    execute_remote_command "nohup bash -c $(shell_quote "${REMOTE_JOB_WRAPPER}") ddpar-job $(shell_quote "${command}") $(shell_quote "${REMOTE_JOB_BASE}") < /dev/null > $(shell_quote "${REMOTE_JOB_BASE}.log") 2>&1 &"
+    execute_remote_command "nohup setsid bash -c $(shell_quote "${REMOTE_JOB_WRAPPER}") ddpar-job $(shell_quote "${command}") $(shell_quote "${REMOTE_JOB_BASE}") < /dev/null > $(shell_quote "${REMOTE_JOB_BASE}.log") 2>&1 &"
 }
 
 # Wrapper fuer Remote-Pipelines: $1 = Pipeline, $2 = Basisname der Statusdateien.
@@ -344,20 +286,16 @@ function ensure_remote_status_dir {
 
 # Gibt "rc <n>", "running" oder "missing" fuer einen Remote-Job aus. Der zweite
 # rc-Test faengt einen Job ab, der zwischen den ersten beiden Tests endet.
-function remote_job_state {
-	local q
-	q=$(shell_quote "$1")
-	execute_remote_command "if [ -f ${q}.rc ]; then echo rc \$(cat ${q}.rc); elif [ -f ${q}.pid ] && kill -0 \$(cat ${q}.pid) 2>/dev/null; then echo running; elif [ -f ${q}.rc ]; then echo rc \$(cat ${q}.rc); else echo missing; fi"
-}
 
-# Beendet die nc-Prozesse auf den uebergebenen Remote-Ports. Der Anker ^...$
-# trifft nur nc selbst, nicht die Wrapper-Shells, damit diese noch den
-# Exit-Status ablegen koennen.
+# Stop only process groups recorded in this run's private status directory.
+# Earlier cleanup matched nc by its port to avoid killing unrelated shells;
+# group ownership now lets us stop dd/gzip too without name-based matching.
 function stop_remote_listeners {
-	local port
-	for port in "$@"; do
-		execute_remote_command "pkill -f '^nc -N -l ${port}\$'" > /dev/null 2>&1
-	done
+  local base q
+  for base in "${REMOTE_JOB_BASES[@]}"; do
+    q=$(shell_quote "${base}")
+    execute_remote_command "if [ ! -f ${q}.rc ] && [ -f ${q}.pid ]; then kill -TERM -- -\$(cat ${q}.pid) 2>/dev/null; printf '143\\n' > ${q}.rc; fi" || true
+  done
 }
 
 function remove_remote_status_dir {
@@ -366,17 +304,10 @@ function remove_remote_status_dir {
 	REMOTE_STATUS_DIR=""
 }
 
-function close_ssh_connection {
-	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    ssh -S "${SSH_SOCKET_PATH}" -O exit "${REMOTE_HOST}"
-    if [ $? -ne 0 ]; then
-        echo -e "${WARNCOLOR}Warnung: Fehler beim Schließen der SSH-Verbindung zu ${REMOTE_HOST}.${NOCOLOR}"
-    fi
-}
 
 function check_remote_commands_availability {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion check_remote_commands_availability aufgerufen${NOCOLOR}" >&2
-    local commands=("bash" "dd" "nc" "df" "tee" "blockdev" "stat" "ss")
+    local commands=("bash" "dd" "nc" "df" "tee" "blockdev" "stat" "ss" "setsid" "mktemp" "cat" "mv" "rm" "sed" "wc" "file" "truncate")
 
     # Im Modus "n" wird gzip bewusst NICHT verlangt: dort wird lokal komprimiert
     # (local compression), die Remote-Seite schreibt den fertigen gzip-Strom
@@ -402,7 +333,7 @@ function check_remote_commands_availability {
 
 function check_commands_availability {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    local commands=("dd" "df" "tee" "blockdev" "stat")  # Liste der zu überprüfenden Befehle
+    local commands=("dd" "df" "tee" "blockdev" "stat" "file" "mktemp" "wc" "cat" "truncate" "rm" "sed" "awk")  # Liste der zu überprüfenden Befehle
 
     if [ "$REMOTE" -eq 1 ]; then
         commands+=("nc" "ssh")
@@ -449,7 +380,7 @@ function check_output_access {
 	# sein, andernfalls das Elternverzeichnis. Bei REMOTE=1 läuft die Prüfung
 	# über execute_command auf dem Remote-Host.
 	local parent
-	parent=$(dirname "${OUTPUT}")
+	parent=$(dirname -- "${OUTPUT}")
 	if execute_command test -e "${OUTPUT}"; then
 		if execute_command test -w "${OUTPUT}"; then return 0; fi
 	elif execute_command test -w "${parent}"; then
@@ -463,16 +394,20 @@ function input_analysis {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
   # Determine the type of the input file
   echo -e "${INFOCOLOR}Analysiere INPUT${NOCOLOR}"
-  INPUT_FILE_TYPE=$(file -b "${INPUT}")
+  if [ ! -f "${INPUT}" ] && [ ! -b "${INPUT}" ]; then
+    echo "Error: input must be a regular file or block device: ${INPUT}" >&2
+    exit 1
+  fi
+  INPUT_FILE_TYPE=$(file -Lb -- "${INPUT}") || exit 1
   echo "\$INPUT_FILE_TYPE = $INPUT_FILE_TYPE"
 
   # Use the appropriate command to calculate the size of the input file
   if [[ "${INPUT_FILE_TYPE}" == "block special"* ]]; then
     #echo "INPUT_SIZE=$(blockdev --getsize64 $INPUT)"
-    INPUT_SIZE=$(blockdev --getsize64 "${INPUT}")
+    INPUT_SIZE=$(blockdev --getsize64 "${INPUT}") || exit 1
     echo "\$INPUT_SIZE=${INPUT_SIZE}"
   else
-    INPUT_SIZE=$(stat -c %s "${INPUT}")
+    INPUT_SIZE=$(stat -Lc %s -- "${INPUT}") || exit 1
     echo "\$INPUT_SIZE=${INPUT_SIZE}"
   fi
 }
@@ -481,7 +416,12 @@ function output_analysis {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
 	# Determine the type of the output file
 	echo -e "${INFOCOLOR}Analysiere OUTPUT${NOCOLOR}"
-	OUTPUT_FILE_TYPE=$(execute_command file -b -- "${OUTPUT}")
+	if ! execute_command test -e "${OUTPUT}"; then
+		OUTPUT_FILE_TYPE=missing
+		OUTPUT_SIZE=0
+		return 0
+	fi
+	OUTPUT_FILE_TYPE=$(execute_command file -Lb -- "${OUTPUT}")
 
 	# Use the appropriate command to calculate the size of the output file
 	echo "\$OUTPUT_FILE_TYPE: ${OUTPUT_FILE_TYPE}"
@@ -489,7 +429,7 @@ function output_analysis {
 		OUTPUT_SIZE=$(execute_command blockdev --getsize64 "${OUTPUT}")
 		echo "\$OUTPUT_SIZE = $OUTPUT_SIZE"
 	else
-		OUTPUT_SIZE=$(execute_command stat -c %s -- "${OUTPUT}")
+		OUTPUT_SIZE=$(execute_command stat -Lc %s -- "${OUTPUT}")
 		echo "\$OUTPUT_SIZE = $OUTPUT_SIZE"
 	fi
 	echo -e "${INFOCOLOR}${FUNCNAME[0]} abgeschlossen${NOCOLOR}"
@@ -502,15 +442,10 @@ function remote_port_generation {
 }
 
 function check_remote_port_availability {
-	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
-    execute_remote_command "ss -tln | grep -qE \":${CURRENT_REMOTE_PORT}[^0-9]\""
-    # Port is free, if exit code is not zero
-    if [[ $? != 0 ]]; then
-        return 0
-    else
-		[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}Port ${CURRENT_REMOTE_PORT} bereits in Benutzung.${NOCOLOR}"
-        return 1
-    fi
+  local listeners
+  listeners=$(execute_remote_command "ss -H -tln") || return 2
+  if grep -qE ":${CURRENT_REMOTE_PORT}[^0-9]" <<< "${listeners}"; then return 1; fi
+  return 0
 }
 
 function size_calculation {
@@ -520,11 +455,16 @@ function size_calculation {
   # lässt, wird vom letzten Teil mit übertragen (siehe part_bytes). Dadurch
   # sind beliebige Eingabegrößen möglich.
   echo -e "${INFOCOLOR}Calculate the size of each input split file${NOCOLOR}"
-  SPLIT_SIZE=$(( (INPUT_SIZE / (NUM_JOBS * BLOCKSIZEBYTES)) * BLOCKSIZEBYTES ))
+  ddpar_uint "${INPUT_SIZE}" || exit 1
+  SPLIT_SIZE=$(( (INPUT_SIZE / NUM_JOBS / BLOCKSIZEBYTES) * BLOCKSIZEBYTES ))
   if [ "${SPLIT_SIZE}" -eq 0 ]; then
     # Eingabe kleiner als NUM_JOBS Blöcke: die ersten Teile übertragen je
     # einen Block, überzählige Teile bleiben leer.
     SPLIT_SIZE=${BLOCKSIZEBYTES}
+  fi
+  if [ "${NUM_JOBS}" -gt "$((9223372036854775807 / SPLIT_SIZE))" ]; then
+    echo 'Error: segment offsets exceed the supported range.' >&2
+    exit 2
   fi
   echo -e "${INFOCOLOR}Splitsize: ${SPLIT_SIZE}${NOCOLOR}"
   if [ $((SPLIT_SIZE * NUM_JOBS)) -ne "${INPUT_SIZE}" ]; then
@@ -551,43 +491,28 @@ function part_bytes {
 function clone_file {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
     # generate further spinoff variables
-    INPUT_FILE_NAME=$(basename "${INPUT}")
+    INPUT_FILE_NAME=$(basename -- "${INPUT}")
 
-    # check output file type and existence
-    if [[ "${OUTPUT_FILE_TYPE}" == *"directory" ]]; then
-        echo "OUTPUT_PATH=${OUTPUT}/${INPUT_FILE_NAME}"
+    # Resolve the actual filename before enforcing overwrite protection.
+    if execute_command test -d "${OUTPUT}"; then
         OUTPUT_PATH="${OUTPUT}/${INPUT_FILE_NAME}"
-    elif [[ "${OUTPUT_FILE_TYPE}" == *"No such file or directory"* ]]; then
-        if [ ! -z "$FORCE" ]; then
-			if execute_command mkdir -p -- "${OUTPUT}"; then
-                OUTPUT_PATH="${OUTPUT}"
-                echo "Directory ${OUTPUT} created successfully."
-            else
-                echo "Error creating directory ${OUTPUT}."
-                return 1
-            fi
-        else
-            echo -e "${REQUESTCOLOR}${OUTPUT} does not exist, should this directory be created? (y/N)${NOCOLOR}"
-            read answer
-            if [ "$answer" == "y" ]; then
-				if execute_command mkdir -p -- "${OUTPUT}"; then
-                    OUTPUT_PATH="${OUTPUT}"
-                    echo -e "${SUCCESSCOLOR}Directory ${OUTPUT} created successfully.${NOCOLOR}"
-                else
-                    echo -e "${ERRORCOLOR}Error creating directory ${OUTPUT}.${NOCOLOR}"
-                    return 1
-                fi
-            else
-                echo "Request to create directory ${OUTPUT} denied."
-                return 1
-            fi
-        fi
     else
-        if [ ! -z "$FORCE" ]; then
-            OUTPUT_PATH="${OUTPUT}"
-            echo -e "${OUTPUT} already exists and will be overwritten due to use of '-f'."
-        else
-            echo -e "${ERRORCOLOR}${OUTPUT} already exists. Will not overwrite it. Use '-f' to force.${NOCOLOR}"
+        OUTPUT_PATH="${OUTPUT}"
+    fi
+    if execute_command test -e "${OUTPUT_PATH}" && [ -z "${FORCE}" ]; then
+        echo "Error: ${OUTPUT_PATH} already exists; use -f to overwrite it." >&2
+        return 1
+    fi
+    if execute_command test -e "${OUTPUT_PATH}" &&
+       ! execute_command test -f "${OUTPUT_PATH}" && ! execute_command test -b "${OUTPUT_PATH}"; then
+        echo "Error: unsupported clone destination: ${OUTPUT_PATH}" >&2
+        return 1
+    fi
+    if execute_command test -b "${OUTPUT_PATH}"; then
+        local target_size
+        target_size=$(execute_command blockdev --getsize64 "${OUTPUT_PATH}") || return 1
+        if [ "${target_size}" -lt "${INPUT_SIZE}" ]; then
+            echo 'Error: target device is too small.' >&2
             return 1
         fi
     fi
@@ -646,13 +571,15 @@ function run_clone_parts {
 		fi
 	fi
 
+	local remote_writer
+	remote_writer="$(declare -f ddpar_write_segment); BLOCKSIZEBYTES=${BLOCKSIZEBYTES}; "
 	for ((PART_NUM=0; PART_NUM<NUM_JOBS; PART_NUM++)); do
 		START=$((PART_NUM * SPLIT_SIZE))
 		COUNT_BYTES=$(part_bytes "${PART_NUM}")
 		# Byte-genaue dd-Aufrufe (count_bytes/skip_bytes/seek_bytes), damit
 		# auch nicht glatt teilbare Eingabegrößen funktionieren. Arrays statt
 		# eval-Strings: Pfade mit Leerzeichen o.ä. sind so ungefährlich.
-		dd_in=(dd if="${INPUT}" bs="${BLOCKSIZEBYTES}" iflag=count_bytes,skip_bytes count="${COUNT_BYTES}" skip="${START}")
+		dd_in=(dd if="${INPUT}" bs="${BLOCKSIZEBYTES}" "iflag=fullblock,count_bytes,skip_bytes" count="${COUNT_BYTES}" skip="${START}")
 		dd_out=(dd of="${output_target}" bs="${BLOCKSIZEBYTES}" oflag=seek_bytes seek="${START}" conv=notrunc)
 
 		if remote_compression_active; then
@@ -660,24 +587,24 @@ function run_clone_parts {
 			# Netz geht nur der komprimierte Strom, die Gegenseite dekomprimiert
 			# ihn vor dem Schreiben (remote decompression). Nur so lässt sich ein
 			# Clone komprimiert übertragen — das Ziel muss die Rohdaten enthalten.
-			if ! setup_remote_listener "gzip -dc | dd of=$(shell_quote "${output_target}") bs=${BLOCKSIZEBYTES} oflag=seek_bytes seek=${START} conv=notrunc"; then
+			if ! setup_remote_listener "${remote_writer} gzip -dc | ddpar_write_segment $(shell_quote "${output_target}") ${COUNT_BYTES} ${START}"; then
 				echo -e "${ERRORCOLOR}Remote-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				return 1
 			fi
-			echo -e "${INFOCOLOR}${dd_in[*]} | gzip -${COMPRESSION_LEVEL} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
-			"${dd_in[@]}" | gzip -"${COMPRESSION_LEVEL}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+			echo -e "${INFOCOLOR}${dd_in[*]} | gzip -${COMPRESSION_LEVEL} | nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | gzip -"${COMPRESSION_LEVEL}" | nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" &
 		elif [ $REMOTE -eq 1 ]; then
 			# Die Empfängerseite läuft auf dem Remote-Host und wird als String
 			# über SSH gestartet; der Pfad ist dort in Anführungszeichen gesetzt.
-			if ! setup_remote_listener "dd of=$(shell_quote "${output_target}") bs=${BLOCKSIZEBYTES} oflag=seek_bytes seek=${START} conv=notrunc"; then
+			if ! setup_remote_listener "${remote_writer} ddpar_write_segment $(shell_quote "${output_target}") ${COUNT_BYTES} ${START}"; then
 				echo -e "${ERRORCOLOR}Remote-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				return 1
 			fi
-			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
-			"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" &
 		else
 			echo -e "${INFOCOLOR}${dd_in[*]} | ${dd_out[*]}${NOCOLOR}"
-			"${dd_in[@]}" | "${dd_out[@]}" &
+			"${dd_in[@]}" | ddpar_write_segment "${output_target}" "${COUNT_BYTES}" "${START}" &
 		fi
 		register_job $! "Teil ${PART_NUM} (clone)"
 	done
@@ -690,7 +617,7 @@ function append_metadata {
 	if [ $REMOTE -eq 1 ]; then
 		execute_remote_command "printf '%s\\n' $(shell_quote "${line}") >> $(shell_quote "${METADATA_FILE}")"
 	else
-		echo "${line}" >> "${METADATA_FILE}"
+		printf '%s\n' "${line}" >> "${METADATA_FILE}"
 	fi
 }
 
@@ -706,20 +633,21 @@ function setup_remote_listener {
 	if [ -z "${REMOTE_PORT}" ]; then
 		remote_port_generation
 	fi
-	CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
+	CURRENT_REMOTE_PORT=$((10000 + (REMOTE_PORT - 10000 + PART_NUM) % 32768))
 	# Schleife zum Generieren eines freien Ports
 	while true; do
 		if check_remote_port_availability; then
 			break
 		else
+			[ "$?" -eq 2 ] && return 1
 			echo -e "${INFOCOLOR}Port ${CURRENT_REMOTE_PORT} on remote machine already in use, generate new port.${NOCOLOR}"
 			remote_port_generation
-			CURRENT_REMOTE_PORT=$(( REMOTE_PORT + PART_NUM ))
+			CURRENT_REMOTE_PORT=$((10000 + (REMOTE_PORT - 10000 + PART_NUM) % 32768))
 		fi
 	done
 
-	echo -e "${INFOCOLOR}REMOTE COMMAND: nc -N -l ${CURRENT_REMOTE_PORT} | ${remote_output_cmd}${NOCOLOR}"
-	if ! execute_remote_background_command "nc -N -l ${CURRENT_REMOTE_PORT} | ${remote_output_cmd}"; then
+	echo -e "${INFOCOLOR}REMOTE COMMAND: receive segment ${PART_NUM} on port ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+	if ! execute_remote_background_command "nc -N -l ${CURRENT_REMOTE_PORT} | { ${remote_output_cmd}; }"; then
 		INTERNAL_EXITCODE=2
 		return 1
 	fi
@@ -769,7 +697,7 @@ function backup_mode {
 			echo -e "${ERRORCOLOR}Fehler: Eingabegröße (${INPUT_SIZE}) überschreitet den verfügbaren Speicherplatz (${FREE_SPACE}).${NOCOLOR}"
 			exit 1
 		fi
-		if [ ! -z "$FORCE" ] && (( INPUT_SIZE > FREE_SPACE )); then
+		if [ -n "$FORCE" ] && (( INPUT_SIZE > FREE_SPACE )); then
 			echo -e "${WARNCOLOR}Warnung: Eingabegröße (${INPUT_SIZE}) überschreitet den verfügbaren Speicherplatz (${FREE_SPACE}). Mit aktiver Komprimierung koennte es dennoch passen.${NOCOLOR}"
 		fi
 	fi
@@ -777,11 +705,29 @@ function backup_mode {
 	echo -e "${SUCCESSCOLOR}Führe die Backup-Aktion durch.${NOCOLOR}"
 
 	# generate further spinoff variables
-	INPUT_FILE_NAME=$(basename "${INPUT}")
+	INPUT_FILE_NAME=$(basename -- "${INPUT}")
 	# Eigener Basisname via -n, sonst Basename der Eingabe
 	OUTPUT_FILE_NAME=${BASE_NAME:-${INPUT_FILE_NAME}}
 	OUTPUT_FILE="${OUTPUT}/${OUTPUT_FILE_NAME}-"
 	METADATA_FILE="${OUTPUT_FILE}metadata.txt"
+
+	if ! ddpar_basename -- "${OUTPUT_FILE_NAME}" || ! ddpar_basename -- "${INPUT_FILE_NAME}"; then
+		echo 'Error: backup basename must fit one metadata line.' >&2
+		return 1
+	fi
+	# Reject generated symlinks and source aliases before any output is opened.
+	local artifact part suffix
+	local artifacts=("${METADATA_FILE}" "${METADATA_FILE}.old")
+	for ((part=0; part<NUM_JOBS; part++)); do
+		for suffix in part gz sha256; do artifacts+=("${OUTPUT_FILE}${part}.${suffix}"); done
+	done
+	for artifact in "${artifacts[@]}"; do
+		if execute_command test -L "${artifact}" ||
+		   { [ "${REMOTE}" -ne 1 ] && [ "${INPUT}" -ef "${artifact}" ]; }; then
+			echo "Error: unsafe backup output: ${artifact}" >&2
+			return 1
+		fi
+	done
 
 	# Write metadata file (lokal oder remote)
 	if [ $REMOTE -eq 1 ]; then
@@ -802,6 +748,7 @@ function backup_mode {
 		fi
 	fi
 
+	append_metadata "BACKUP_STATE=incomplete" || return 1
 	append_metadata "NUM_JOBS=${NUM_JOBS}" || return 1
 	# FILE_NAME = Basisname der Backup-Dateien (bei -n abweichend von INPUT_FILE_NAME)
 	append_metadata "FILE_NAME=${OUTPUT_FILE_NAME}" || return 1
@@ -834,7 +781,7 @@ function backup_mode {
 		# Byte-genaue dd-Aufrufe (count_bytes/skip_bytes), damit auch nicht
 		# glatt teilbare Eingabegrößen funktionieren. Direkte Pipelines statt
 		# eval-Strings: Pfade mit Leerzeichen o.ä. sind so ungefährlich.
-		dd_in=(dd if="${INPUT}" bs="${BLOCKSIZEBYTES}" iflag=count_bytes,skip_bytes count="${COUNT_BYTES}" skip="${START}")
+		dd_in=(dd if="${INPUT}" bs="${BLOCKSIZEBYTES}" "iflag=fullblock,count_bytes,skip_bytes" count="${COUNT_BYTES}" skip="${START}")
 		dd_out=(dd of="${PART_BASE}.part" bs="${BLOCKSIZEBYTES}")
 
 		if remote_compression_active; then
@@ -846,8 +793,8 @@ function backup_mode {
 				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				break
 			fi
-			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
-			"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" &
 		elif [ "$REMOTE" -eq 1 ] && [ "$COMPRESSION" -eq 1 ]; then
 			# Remote netcat backup mit lokaler Kompression: gzip läuft auf
 			# DIESER Maschine, über das Netz geht nur der komprimierte Strom.
@@ -857,8 +804,8 @@ function backup_mode {
 				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				break
 			fi
-			echo -e "${INFOCOLOR}${dd_in[*]} | gzip -${COMPRESSION_LEVEL} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
-			"${dd_in[@]}" | gzip -"${COMPRESSION_LEVEL}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
+			echo -e "${INFOCOLOR}${dd_in[*]} | gzip -${COMPRESSION_LEVEL} | nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | gzip -"${COMPRESSION_LEVEL}" | nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" &
 		elif [ $REMOTE -eq 1 ]; then
 			# Remote netcat backup, unkomprimiert, ohne Checksumme. Die
 			# Empfängerseite läuft auf dem Remote-Host (String via SSH).
@@ -866,23 +813,56 @@ function backup_mode {
 				echo -e "${ERRORCOLOR}Remote-Backup-Empfänger für Teil ${PART_NUM} konnte nicht gestartet werden.${NOCOLOR}"
 				break
 			fi
-			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_HOST#*@} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
-			"${dd_in[@]}" | nc "${REMOTE_HOST#*@}" "${CURRENT_REMOTE_PORT}" &
-		elif [ $CHECKSUM -eq 1 ] && [ $COMPRESSION -eq 1 ]; then
-			echo -e "${INFOCOLOR}${dd_in[*]} | tee >(sha256sum > ${PART_BASE}.sha256) | gzip -${COMPRESSION_LEVEL} > ${PART_BASE}.gz${NOCOLOR}"
-			"${dd_in[@]}" | tee >(sha256sum > "${PART_BASE}.sha256") | gzip -"${COMPRESSION_LEVEL}" > "${PART_BASE}.gz" &
-		elif [ $COMPRESSION -eq 1 ]; then
+			echo -e "${INFOCOLOR}${dd_in[*]} | nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT}${NOCOLOR}"
+			"${dd_in[@]}" | nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" &
+		elif [ "${CHECKSUM}" -eq 1 ] && [ "${COMPRESSION}" -eq 1 ]; then
+			echo -e "${INFOCOLOR}${dd_in[*]} | gzip -${COMPRESSION_LEVEL} > ${PART_BASE}.gz; verify raw checksum${NOCOLOR}"
+			( "${dd_in[@]}" | gzip -"${COMPRESSION_LEVEL}" > "${PART_BASE}.gz" &&
+			  gzip -dc -- "${PART_BASE}.gz" | sha256sum > "${PART_BASE}.sha256" ) &
+		elif [ "${COMPRESSION}" -eq 1 ]; then
 			echo -e "${INFOCOLOR}${dd_in[*]} | gzip -${COMPRESSION_LEVEL} > ${PART_BASE}.gz${NOCOLOR}"
 			"${dd_in[@]}" | gzip -"${COMPRESSION_LEVEL}" > "${PART_BASE}.gz" &
-		elif [ $CHECKSUM -eq 1 ]; then
-			echo -e "${INFOCOLOR}${dd_in[*]} | tee >(sha256sum > ${PART_BASE}.sha256) | ${dd_out[*]}${NOCOLOR}"
-			"${dd_in[@]}" | tee >(sha256sum > "${PART_BASE}.sha256") | "${dd_out[@]}" &
+		elif [ "${CHECKSUM}" -eq 1 ]; then
+			echo -e "${INFOCOLOR}${dd_in[*]} | ${dd_out[*]}; verify raw checksum${NOCOLOR}"
+			( "${dd_in[@]}" | "${dd_out[@]}" && sha256sum < "${PART_BASE}.part" > "${PART_BASE}.sha256" ) &
 		else
 			echo -e "${INFOCOLOR}${dd_in[*]} | ${dd_out[*]}${NOCOLOR}"
 			"${dd_in[@]}" | "${dd_out[@]}" &
 		fi
 		register_job $! "Teil ${PART_NUM} (backup)"
 	done
+}
+
+# Verify all outputs before publishing the backup as complete. A failed run
+# retains incomplete metadata, preventing restore of a mixture of old/new parts.
+function finalize_backup {
+    local part path actual expected
+    for ((part=0; part<NUM_JOBS; part++)); do
+        expected=$(part_bytes "${part}")
+        if [ "${COMPRESSION}" -eq 1 ]; then
+            path="${OUTPUT_FILE}${part}.gz"
+            if [ "${REMOTE}" -eq 1 ]; then
+                if remote_compression_active; then
+                    actual=$(execute_remote_command "gzip -dc -- $(shell_quote "${path}") | wc -c") || return 1
+                else
+                    actual=$(execute_remote_command "cat -- $(shell_quote "${path}")" | gzip -dc | wc -c) || return 1
+                fi
+            else
+                actual=$(gzip -dc -- "${path}" | wc -c) || return 1
+            fi
+        else
+            path="${OUTPUT_FILE}${part}.part"
+            actual=$(execute_command stat -Lc %s -- "${path}") || return 1
+        fi
+        if [ "${actual}" -ne "${expected}" ]; then
+            echo "Error: incomplete backup part: ${path}" >&2
+            return 1
+        fi
+        if [ "${CHECKSUM}" -ne 1 ] || [ "${REMOTE}" -eq 1 ]; then
+            execute_command rm -f -- "${OUTPUT_FILE}${part}.sha256" || return 1
+        fi
+    done
+    execute_command sed -i 's/^BACKUP_STATE=incomplete$/BACKUP_STATE=complete/' "${METADATA_FILE}"
 }
 
 # Verwaltung der parallelen Hintergrund-Jobs:
@@ -919,7 +899,7 @@ function wait_for_jobs {
 			failed=$((failed + 1))
 		fi
 	done
-	if [ "${#JOB_PIDS[@]}" -eq 0 ]; then
+	if [ "${#JOB_PIDS[@]}" -ne "${NUM_JOBS}" ]; then
 		echo "Fehler: Es wurde kein Clone- oder Backup-Job gestartet." >&2
 		failed=$((failed + 1))
 	fi
@@ -970,29 +950,12 @@ function wait_for_jobs {
 	return 0
 }
 
-function cleanup_on_signal {
-	trap - INT TERM
-	echo -e "${WARNCOLOR}Abbruch: Beende laufende Teil-Prozesse ...${NOCOLOR}" >&2
-	local pids
-	pids=$(jobs -p)
-	if [ -n "$pids" ]; then
-		# shellcheck disable=SC2086 # PIDs sind whitespace-getrennt gewollt
-		kill $pids 2>/dev/null
-		wait $pids 2>/dev/null
-	fi
-	if [ $REMOTE -eq 1 ] && is_ssh_socket_alive; then
-		stop_remote_listeners "${REMOTE_LISTENER_PORTS[@]}"
-		remove_remote_status_dir
-		close_ssh_connection
-	fi
-	exit 130
-}
 
 
 ################
 # Script Start #
 ################
-trap cleanup_on_signal INT TERM
+trap ddpar_cancel INT TERM
 set_colors
 option_analysis "$@"
 check_input_access
@@ -1003,10 +966,7 @@ if ! check_commands_availability; then
     exit 1
 fi
 if [ $REMOTE -eq 1 ]; then
-    is_ssh_socket_alive
-    if [ $? -ne 0 ]; then
-        connect_ssh
-    fi
+    connect_ssh || exit 1
     if ! check_remote_commands_availability; then
         echo -e "${ERRORCOLOR}Fehler: Benötigte Befehle fehlen auf ${REMOTE_HOST}.${NOCOLOR}"
         close_ssh_connection
@@ -1044,6 +1004,7 @@ case $MODE in
         backup_mode || INTERNAL_EXITCODE=1
         # Wait for all jobs to finish and collect their exit codes
         wait_for_jobs
+        if [ "${INTERNAL_EXITCODE}" -eq 0 ]; then finalize_backup || INTERNAL_EXITCODE=1; fi
         ;;
     *)
         echo "Ungültiger Modus: $MODE. Gültige Angaben: clone|backup"
@@ -1052,8 +1013,7 @@ case $MODE in
 esac
 
 if [ $REMOTE -eq 1 ]; then
-	close_ssh_connection
-	if [ $? -eq 0 ]; then
+	if close_ssh_connection; then
 		echo -e "${SUCCESSCOLOR}SSH-Verbindung zu ${REMOTE_HOST} erfolgreich gertrennt.${NOCOLOR}"
 	fi
 fi

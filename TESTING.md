@@ -225,7 +225,8 @@ sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r n -R $REMOTE_HOST
 
 ### 4.3 Remote Clone – Block Device, vollständig verschlüsselt (Modus l)
 
-Modus `l`: Gesamte Übertragung läuft durch den SSH-Tunnel.
+Modus `l` ist nicht implementiert. Der folgende Aufruf muss mit Fehlerstatus
+abbrechen, ohne einen unverschlüsselten Transfer zu starten.
 
 ```bash
 sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r l -R $REMOTE_HOST
@@ -284,41 +285,12 @@ sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_BACKUP_DIR -m backup -r n -R $REMOTE_H
 > Erzeugte Dateien auf dem Remote-Host:
 > `$REMOTE_BACKUP_DIR/ddpar_test.img-0.part` … + `ddpar_test.img-metadata.txt`.
 
-#### Test ohne echten Remote-Host (Fake-`ssh`-Stub)
+#### Automatisierte Prüfung
 
-Ist kein SSH-Server verfügbar, lässt sich der Remote-Backup-Codepfad mit einem
-`ssh`-Stub im `PATH` validieren (prüft Befehlsaufbau und sequentielle Ports,
-überträgt aber keine echten Daten):
-
-```bash
-mkdir -p /tmp/fakebin
-cat > /tmp/fakebin/ssh <<'STUB'
-#!/bin/bash
-args="$*"
-case "$args" in
-  *"-O check"*) exit 1;;   # kein bestehender Socket
-  *"-O exit"*)  exit 0;;
-esac
-cmd="${@: -1}"
-case "$cmd" in
-  *"'file' '-b'"*) echo "directory"; exit 0;;  # execute_command quotet jedes Argument
-  *"ss -tuln"*)  exit 0;;  # Verifikationsschleife: Prozess läuft
-  *"ss -tln"*)   exit 1;;  # Portprüfung: Port frei
-  *"nohup"*)     exit 0;;  # Empfänger-Start im Hintergrund
-  *"mktemp -d"*) echo /tmp/ddpar-status.stub; exit 0;;  # Statusverzeichnis
-  *"echo running"*) echo "rc 0"; exit 0;;  # Statusabfrage: Pipeline erfolgreich
-  *"command -v"*) exit 0;;
-  *) exit 0;;
-esac
-STUB
-chmod +x /tmp/fakebin/ssh
-
-PATH="/tmp/fakebin:$PATH" ./ddpar.sh -i $SOURCE_FILE -o /tmp/ddpar_backup \
-  -m backup -r n -R localhost -j 4 -b 1048576
-```
-
-Erwartung: pro Teil eine Zeile `REMOTE COMMAND: nc -N -l <PORT> | dd of=…-N.part`
-mit aufsteigenden Ports sowie lokal `dd if=… | nc localhost <PORT> &`.
+Für diesen Datenpfad `tests/remote.bats` mit einem erreichbaren SSH-Testhost
+oder das Zwei-Container-Harness verwenden. Ein Stub, der nur erfolgreichen
+Befehlsaufbau meldet, validiert weder die Daten noch deren Länge oder den
+Abschluss der Remote-Pipelines.
 
 ### 4.8 Remote Restore – Block Device, unkomprimiert (Modus n)
 
@@ -342,44 +314,12 @@ sudo ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/sdb -o $DEST_DEV -r n -R $REMOTE_H
 
 > **Voraussetzung:** Ein vorher erstelltes Remote-Backup aus Test 4.7.
 
-#### Test ohne echten Remote-Host (Fake-`ssh`-Stub)
+#### Automatisierte Prüfung
 
-Wie bei Test 4.6/4.7 lässt sich auch der Remote-Restore-Codepfad ohne SSH-Server
-mit einem `ssh`-Stub im `PATH` validieren. Der Stub muss zusätzlich beim
-`cat …metadata.txt` gültige Metadaten liefern:
-
-```bash
-mkdir -p /tmp/fakebin
-cat > /tmp/fakebin/ssh <<'STUB'
-#!/bin/bash
-args="$*"
-case "$args" in
-  *"-O check"*) exit 1;;
-  *"-O exit"*)  exit 0;;
-esac
-cmd="${@: -1}"
-case "$cmd" in
-  *metadata.txt*)
-    printf 'NUM_JOBS=4\nFILE_NAME=in.img\nBLOCKSIZEBYTES=1048576\nINPUT_SIZE=4194304\nINPUT_FILE_NAME=in.img\nFILE_TYPE=data\nSPLIT_SIZE=1048576\n'
-    exit 0;;
-  *"ss -tuln"*) exit 0;;   # Sender-Listener läuft
-  *"ss -tln"*)  exit 1;;   # Port frei
-  *"nohup"*)    exit 0;;   # Remote-Sender im Hintergrund
-  *"mktemp -d"*) echo /tmp/ddpar-status.stub; exit 0;;  # Statusverzeichnis
-  *"echo running"*) echo "rc 0"; exit 0;;  # Statusabfrage: Pipeline erfolgreich
-  *true)        exit 0;;
-  *) exit 0;;
-esac
-STUB
-chmod +x /tmp/fakebin/ssh
-
-echo "y" | PATH="/tmp/fakebin:$PATH" ./ddpar-restore.sh \
-  -i /tmp/ddpar_backup/in.img -o /tmp/restore_out.img -r n -R localhost
-```
-
-Erwartung: pro Teil `REMOTE COMMAND: dd if=…-N.part … | nc -N -l <PORT>` (Remote
-sendet) und lokal `nc localhost <PORT> | dd of=… seek=N count=1` mit aufsteigenden
-Ports und Offsets.
+Für diesen Datenpfad `tests/remote.bats` mit einem erreichbaren SSH-Testhost
+oder das Zwei-Container-Harness verwenden. Ein Stub, der nur erfolgreichen
+Befehlsaufbau meldet, validiert weder die Daten noch deren Länge oder den
+Abschluss der Remote-Pipelines.
 
 ### 4.10 Remote Check – Quelle gegen Remote-Backup (Source ↔ Backup)
 
@@ -415,30 +355,12 @@ sudo ./ddpar-check.sh -s $SOURCE_DEV -d $REMOTE_DEST_DEV -r n -R $REMOTE_HOST -j
 > **Abweichung:** Ohne `-b` gibt es keine Metadaten; `-j`/`-B` müssen zum
 > ursprünglichen Clone-Aufruf passen.
 
-#### Test ohne echten Remote-Host (Fake-`ssh`-Stub)
+#### Automatisierte Prüfung
 
-Da der Check nur Hashes vergleicht, kann ein `ssh`-Stub das Remote-Kommando lokal
-ausführen (Remote == localhost), wodurch echte Hashes über reale Dateien berechnet
-werden:
-
-```bash
-mkdir -p /tmp/fakebin
-cat > /tmp/fakebin/ssh <<'STUB'
-#!/bin/bash
-args="$*"
-case "$args" in
-  *"-O check"*) exit 1;;
-  *"-O exit"*)  exit 0;;
-esac
-cmd="${@: -1}"   # Remote-Kommando lokal ausführen
-bash -c "$cmd"
-STUB
-chmod +x /tmp/fakebin/ssh
-
-# Backup-Check gegen ein lokal erzeugtes "Remote"-Backup
-PATH="/tmp/fakebin:$PATH" ./ddpar-check.sh \
-  -s /tmp/ddpartest/in.img -b /tmp/ddpar_backup/in.img -r n -R localhost
-```
+Für diesen Datenpfad `tests/remote.bats` mit einem erreichbaren SSH-Testhost
+oder das Zwei-Container-Harness verwenden. Ein Stub, der nur erfolgreichen
+Befehlsaufbau meldet, validiert weder die Daten noch deren Länge oder den
+Abschluss der Remote-Pipelines.
 
 ### 4.13 Remote mit lokaler [De]Kompression (Modus n + -c)
 

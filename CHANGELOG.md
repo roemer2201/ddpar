@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased] – Vollständiges Review vom 17.10.2026
+
+- Lokale Checks lesen tatsächliche Backup-Teile und prüfen Länge, gzip-CRC sowie Prüfsummen.
+- Restore prüft alle Rohdatenlängen und verfügbare lokale SHA256-Dateien vor dem Schreiben; Dateiziele werden exakt gekürzt, leere Abbilder unterstützt.
+- Clone schützt vorhandene Dateien auch unter Verzeichniszielen; neue Dateiziele und Symlinks funktionieren mit korrekten Größen. Backup-/Restore-Aliase werden abgelehnt.
+- Gemeinsamer Parser in `ddpar-common.sh` validiert Metadaten, Basenamen, Duplikate und Arithmetikgrenzen; alle vier Skripte gemeinsam ausliefern.
+- Prüfsummen-Jobs werden vollständig gewartet. Neue Backups bleiben bis zum erfolgreichen Abschluss `incomplete`; erneute Backups ohne `-s` entfernen alte Sidecars.
+- Private SSH-Control-Sockets je Lauf, Alias-Auflösung, explizites Remote-`pipefail`, höchstens vier gleichzeitige Hash-Sitzungen und Fehlerweitergabe bei Verbindungsaufbau.
+- Clone-/Restore-Schreiber zählen tatsächliche Bytes; Remote-Prozessgruppen und lokale Prozessbäume werden bei Abbruch beendet. Zombie-Wrapper gelten als fehlgeschlagen.
+- netcat-Clients erhalten ein Inaktivitätslimit (Default 300 s, `DDPAR_NETWORK_TIMEOUT`), SSH erkennt tote Verbindungen per Keepalive.
+- `-r l` wird abgelehnt, statt unverschlüsselt fortzusetzen. Dokumentierte lange CLI-Aliase funktionieren; unbekannte Optionen und zusätzliche Argumente führen zum Fehler.
+- Regressionstests und Dokumentation ergänzt; vollständiges ShellCheck-Ergebnis ist nun verbindliches CI-Gate.
+
 ## [Unreleased] – Review-Korrekturen
 
 - Lokale Pfade werden ohne `eval` als Argumente übergeben; Remote-Pfade werden

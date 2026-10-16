@@ -9,7 +9,7 @@ gleichzeitig im Hintergrund (`&`), am Ende wartet das Skript mit `wait` auf alle
 ### Segmentberechnung
 
 ```
-SPLIT_SIZE = INPUT_SIZE / NUM_JOBS
+SPLIT_SIZE = (INPUT_SIZE / NUM_JOBS / BLOCKSIZEBYTES) * BLOCKSIZEBYTES
 
 Segment N (Offsets und Länge in Bytes, letztes Segment inkl. Rest):
   Lesen:     dd if=INPUT  iflag=count_bytes,skip_bytes count=$(part_bytes N) skip=$((N * SPLIT_SIZE))
@@ -38,7 +38,7 @@ dd if=INPUT ... | dd of=OUTPUT_PART ...  &
 ### Backup lokal, mit Checksumme
 
 ```
-dd if=INPUT ... | tee >(sha256sum > PART.sha256) | dd of=OUTPUT_PART ...  &
+(dd if=INPUT ... | dd of=OUTPUT_PART ... && sha256sum < OUTPUT_PART > PART.sha256) &
 ```
 
 ### Backup lokal, mit gzip-Kompression
@@ -50,8 +50,16 @@ dd if=INPUT ... | gzip -LEVEL > OUTPUT_PART.gz  &
 ### Backup lokal, mit Checksumme + gzip
 
 ```
-dd if=INPUT ... | tee >(sha256sum > PART.sha256) | gzip -LEVEL > OUTPUT_PART.gz  &
+(dd if=INPUT ... | gzip -LEVEL > OUTPUT_PART.gz && gzip -dc -- OUTPUT_PART.gz | sha256sum > PART.sha256) &
 ```
+
+Checksummen werden nach erfolgreichem Schreiben aus dem gespeicherten Teil
+berechnet (bei gzip aus den Rohdaten). Der gesamte Job wird mit `wait`
+ausgewertet; eine unabhängige, ungewartete Prozesssubstitution entfällt.
+Das kostet einen zusätzlichen Lesevorgang, erfasst aber auch Schreibfehler der
+Prüfsummendatei. Vor Freigabe der Metadaten werden alle Teile auf ihre Länge
+geprüft. Das kann beim komprimierten Remote-Backup einen weiteren Lese- und
+Dekompressionsvorgang erfordern.
 
 ### Remote Clone (Netcat)
 
@@ -62,7 +70,7 @@ dd if=INPUT ... | nc REMOTE_HOST PORT  &
 
 **Remote (startet zuerst als Listener):**
 ```
-nc -N -l PORT | dd of=OUTPUT ...  (via SSH mit nohup abgekoppelt, Status in Datei)
+nc -N -l PORT | ddpar_write_segment OUTPUT COUNT_BYTES START  (via SSH mit nohup abgekoppelt, Status in Datei)
 ```
 
 Das Skript prüft nach dem Start des Remote-Listeners per `ss -tln`, ob der Port
@@ -94,7 +102,7 @@ dd if=INPUT ... | gzip -LEVEL | nc REMOTE_HOST PORT  &
 
 **Remote:**
 ```
-nc -N -l PORT | gzip -dc | dd of=OUTPUT ... seek=... conv=notrunc  &
+nc -N -l PORT | gzip -dc | ddpar_write_segment OUTPUT COUNT_BYTES START  &
 ```
 
 ### Remote Backup (Netcat) mit lokaler Kompression (`-c`)
@@ -141,7 +149,7 @@ dd if=BASE-N.gz bs=BLOCKSIZE iflag=fullblock | nc -N -l PORT   (bzw. BASE-N.part
 
 **Lokal (Empfänger):**
 ```
-nc REMOTE_HOST PORT </dev/null | zcat | dd of=OUTPUT ... seek=...  &
+nc -w TIMEOUT REMOTE_ADDRESS PORT </dev/null | zcat | ddpar_write_segment OUTPUT COUNT_BYTES START  &
 ```
 
 Ob der komprimierte Pfad genutzt wird, entscheidet `COMPRESSION` aus der
@@ -157,7 +165,7 @@ zcat BASE-N.gz | nc -N -l PORT
 
 **Lokal (Empfänger):**
 ```
-nc REMOTE_HOST PORT </dev/null | dd of=OUTPUT ... seek=...  &
+nc -w TIMEOUT REMOTE_ADDRESS PORT </dev/null | ddpar_write_segment OUTPUT COUNT_BYTES START  &
 ```
 
 Die `.gz`-Teile sind in beiden Modi identisch: ein mit `-r c` erzeugtes Backup
@@ -184,7 +192,7 @@ Beim Remote-Clone und Remote-Backup schreibt die Gegenseite: wenn der lokale
 Sender fertig ist, kann dort noch gepuffertes Material unterwegs sein — im Modus
 `c` muss zusätzlich `gzip` den Rest der Pipe verarbeiten.
 
-Jede Remote-Pipeline wird per `nohup` von SSH abgekoppelt gestartet, sodass nur
+Jede Remote-Pipeline wird per `nohup setsid` von SSH abgekoppelt gestartet, sodass nur
 kurze SSH-Sitzungen über den ControlMaster laufen. Dauerhaft offene Sitzungen je
 Teil-Job würden bei vielen Jobs das sshd-Limit `MaxSessions` (Standard 10)
 überschreiten; ssh wiche dann auf neue Verbindungen aus, die bei Passwort-Login
@@ -196,7 +204,7 @@ Gegenseite) je Job ab:
 
 | Datei | Inhalt |
 |---|---|
-| `jobN-PORT.pid` | PID des Wrappers (Lebendprüfung per `kill -0`) |
+| `jobN-PORT.pid` | PID und Prozessgruppen-ID des Wrappers (Lebendprüfung plus Zombie-Erkennung) |
 | `jobN-PORT.rc` | Exit-Status der gesamten Pipeline (atomar via `mv`) |
 | `jobN-PORT.log` | stdout/stderr der Pipeline (letzte Zeilen werden bei Fehlern ausgegeben) |
 
@@ -208,9 +216,9 @@ es bewusst nicht: Nach dem Ende des Senders kann die Gegenseite legitim noch
 lange schreiben (gzip, Flush beim Schließen eines Blockgeräts).
 
 Ist ein lokaler Job fehlgeschlagen oder ein Teil nicht gestartet worden, beendet
-`stop_remote_listeners` vorher die zugehörigen `nc`-Prozesse
-(`pkill -f '^nc -N -l PORT$'`), damit kein Listener ewig auf seinen Partner
-wartet. Das Statusverzeichnis wird am Ende (und bei SIGINT/SIGTERM) gelöscht.
+`stop_remote_listeners` vorher die in diesem Lauf registrierten Prozessgruppen,
+damit weder Listener noch dd/gzip-Prozesse verwaist weiterlaufen. Dabei wird ein
+Fehlerstatus für die abgebrochenen Jobs hinterlegt. Das Statusverzeichnis wird am Ende (und bei SIGINT/SIGTERM) gelöscht.
 
 ---
 
@@ -221,6 +229,7 @@ die alle Parameter enthält, die `ddpar-restore.sh` und `ddpar-check.sh` für
 die Rekonstruktion benötigen:
 
 ```
+BACKUP_STATE=complete
 NUM_JOBS=4
 FILE_NAME=sdb
 BLOCKSIZEBYTES=1048576
@@ -232,9 +241,14 @@ COMPRESSION=1          # nur wenn komprimiert
 COMPRESSION_LEVEL=6    # nur wenn komprimiert
 ```
 
-**Wichtig:** Alle `grep`-Zugriffe auf diese Datei müssen mit `^`-Anker arbeiten
-(`grep "^KEY="`), da sonst Präfix-Matches auftreten können (z.B. `COMPRESSION`
-matcht auch `COMPRESSION_LEVEL`).
+`ddpar-common.sh` liest erkannte Schlüssel als Daten mit `read -r`, ohne
+`source`/`eval`. Doppelte Schlüssel, unsichere Basisnamen, unbekannte
+Kompressionswerte und Zahlen außerhalb vorzeichenbehafteter 64-Bit-Arithmetik
+werden abgelehnt. Produkte für Geometrie und Offsets werden vorab geprüft.
+`INPUT_SIZE` darf bei älteren Metadaten fehlen (dann gilt `SPLIT_SIZE * NUM_JOBS`).
+`BACKUP_STATE` fehlt in älteren Backups und wird dann nicht vorausgesetzt.
+Neue Backups beginnen mit `incomplete`; nur nach Erfolg aller Jobs und der
+Teileprüfung wird der Status auf `complete` gesetzt.
 
 ---
 
@@ -243,17 +257,17 @@ matcht auch `COMPRESSION_LEVEL`).
 ### SSH-Multiplexing
 
 `ddpar.sh` öffnet eine persistente SSH-Master-Verbindung über einen Unix-Socket
-(`SSH_SOCKET_PATH`). Alle weiteren SSH-Aufrufe (Befehle, Hintergrundprozesse)
+(`SSH_SOCKET_PATH` unter einem privaten `/tmp/ddpar-ssh.XXXXXX/`). Alle weiteren SSH-Aufrufe (Befehle, Hintergrundprozesse)
 laufen über diesen Kontroll-Socket, ohne erneute Authentifizierung.
 
 ```
-ssh -o ControlMaster=auto -o ControlPersist=yes -S SOCKET HOST true
+ssh -o ControlMaster=yes -o ControlPersist=yes -S SOCKET HOST true
 ```
 
 ### Port-Auswahl
 
 Für jeden Job wird ein Port aus dem Bereich **10000–42767** zufällig gewählt
-(`REMOTE_PORT + PART_NUM`). Vor der Nutzung prüft `check_remote_port_availability()`
+(`10000 + (REMOTE_PORT - 10000 + PART_NUM) % 32768`). Vor der Nutzung prüft `check_remote_port_availability()`
 via `ss -tln`, ob der Port auf dem Remote-Host frei ist. Bei Kollision wird
 ein neuer Port generiert.
 
@@ -264,7 +278,7 @@ ein neuer Port generiert.
 | `n` | Netcat ohne Datenverschlüsselung | ✅ |
 | `n` + `-c` | Netcat, [De]Kompression auf der lokalen Seite | ✅ (Backup/Restore/Check) |
 | `c` + `-c` | Netcat, [De]Kompression auf der Remote-Seite | ✅ (Clone/Backup/Restore/Check) |
-| `l` | Vollständig über SSH (verschlüsselt) | 🛑 nicht implementiert (fällt mit Warnung auf `n` zurück) |
+| `l` | Vollständig über SSH (verschlüsselt) | 🛑 nicht implementiert; Aufruf wird abgelehnt |
 
 Wer was komprimiert und was über das Netz geht:
 
@@ -287,7 +301,6 @@ Modus `n` braucht **kein** `gzip` auf der Gegenseite, Modus `c` schon
 |---|---|
 | `option_analysis` | Kommandozeilenparameter parsen und validieren |
 | `set_colors` | ANSI-Farbvariablen setzen (nur wenn Terminal Farben unterstützt) |
-| `establish_ssh_connection` | SSH-Verbindung aufbauen (mit oder ohne Passwort via sshpass) |
 | `connect_ssh` | SSH-Verbindung prüfen und ggf. aufbauen |
 | `is_ssh_socket_alive` | Prüft ob der SSH-Kontroll-Socket noch aktiv ist |
 | `execute_command` | Argument-Array lokal direkt, remote mit Shell-Quoting ausführen |
@@ -295,7 +308,7 @@ Modus `n` braucht **kein** `gzip` auf der Gegenseite, Modus `c` schon
 | `execute_remote_background_command` | Remote-Pipeline abgekoppelt (`nohup`) mit Status-Wrapper starten |
 | `ensure_remote_status_dir` / `remove_remote_status_dir` | Statusverzeichnis auf der Gegenseite anlegen bzw. löschen |
 | `remote_job_state` | Status eines Remote-Jobs abfragen (`rc N`, `running`, `missing`) |
-| `stop_remote_listeners` | `nc`-Prozesse auf den Remote-Ports beenden (Fehlerfall, Abbruch) |
+| `stop_remote_listeners` | Eigene Remote-Prozessgruppen beenden (Fehlerfall, Abbruch) |
 | `close_ssh_connection` | SSH-Multiplexing-Verbindung schließen |
 | `check_commands_availability` | Prüft ob benötigte Tools lokal vorhanden sind |
 | `check_remote_commands_availability` | Prüft ob benötigte Tools remote vorhanden sind |
@@ -314,3 +327,23 @@ Modus `n` braucht **kein** `gzip` auf der Gegenseite, Modus `c` schon
 | `wait_for_jobs` | Wartet auf lokale Teil-Jobs und fragt danach den Status der Remote-Pipelines ab |
 | `append_metadata` | Schreibt eine Zeile in die Metadatendatei (lokal oder remote) |
 | `register_job` / `wait_for_jobs` | Sammeln der Exit-Codes aller parallelen Teil-Jobs |
+
+## Gemeinsame Validierung und vollständige Datenströme
+
+Die drei Einstiegsskripte laden `ddpar-common.sh` aus ihrem eigenen Verzeichnis.
+`ddpar_write_segment` begrenzt die Schreibmenge und zählt zugleich über einen
+explizit gewarteten `wc`-Prozess die empfangenen Bytes. Ein sauberes EOF vor der
+Sollmenge ist ein Fehler, auch wenn `dd` selbst Status 0 liefert. Vorab werden
+Restore-Teile vollständig auf Länge und gzip-Fehler geprüft. Vorhandene lokale
+Prüfsummen werden als genau ein SHA256-Digest für stdin interpretiert, ohne
+das Dateinamenfeld einer fremden Prüfsummendatei auszuführen oder zu öffnen.
+
+`execute_remote_command` startet explizit Bash mit `pipefail`, unabhängig von
+der Login-Shell. Remote-Hashvergleiche begrenzen gleichzeitig laufende
+SSH-Sitzungen auf vier. Jeder Aufruf besitzt seinen SSH-Socket und räumt
+Statusdateien, Metadaten-Temporärdateien und Verbindungen über den EXIT-Trap auf.
+Ein konfigurierbares netcat-Inaktivitätslimit und SSH-Keepalives erkennen
+unterbrochene Verbindungen; sie begrenzen keinen gesunden abschließenden
+Schreibvorgang. Quelle und Backup-Dateien müssen während der Operation stabil
+sein; paralleles Ändern oder Wiederverwenden desselben Backup-Basisnamens ist
+nicht unterstützt.

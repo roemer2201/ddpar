@@ -1,12 +1,15 @@
 #!/bin/bash
 #
 # Compare segmented backups or clones against their source or destination.
+# Version: 1.0.1 (2026-10-17)
 # Flow: parse and validate inputs; hash each segment; report every job's status.
 
 # Fehler in dd-/sha256sum-Pipelines sollen den Exit-Code der Pipeline
 # bestimmen — so führt ein fehlgeschlagener Vergleich (sha256sum -c) zu
 # einem Fehler-Exit des jeweiligen Teil-Jobs.
 set -o pipefail
+# shellcheck source=ddpar-common.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ddpar-common.sh" || exit 1
 
 # Set the input and output file names
 #OUTPUT_PATH=/dev
@@ -23,11 +26,11 @@ REMOTE=0
 # Maschine, "c" = Dekompression auf der Remote-Maschine
 REMOTE_MODE="n"
 REMOTE_HOST=""
-SSH_SOCKET_PATH="/tmp/ssh_socket_ddpar"
+
 DEBUG=0
 
 function show_help {
-  SCRIPT_NAME=$(basename "$0")
+  SCRIPT_NAME=$(basename -- "$0")
   echo "$SCRIPT_NAME - Verify consistency of source, backup or destination."
   echo "Verwendung: $SCRIPT_NAME [Optionen]"
   echo ""
@@ -45,88 +48,16 @@ function show_help {
   echo "                  c: die Gegenseite packt selbst aus und hasht, es geht nur der"
   echo "                    SHA256-Hash über SSH; dort wird gzip benötigt"
   echo "-R user@host    Angabe des Remote-Host"
+  echo "DDPAR_NETWORK_TIMEOUT: netcat inactivity timeout in seconds (default: 300)."
   echo "-h, --help      Zeigt diese Hilfemeldung an"
 }
 
-function establish_ssh_connection {
-  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  local target=$1
-  local control_path=$2
-  local password=$3
-  if [ -n "$password" ]; then
-    if ! which sshpass > /dev/null; then
-      echo "Der Befehl \"sshpass\" existiert nicht. Bitte installieren Sie das entsprechende Paket über ihren Paketmanager."
-      exit 1
-    fi
-    SSHPASS="$password" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
-  else
-    echo "Verbindungsaufbau mit Sockel ${control_path} zu ${target}"
-    ssh -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=yes -S "${control_path}" "${target}" true
-  fi
-  return $?
-}
 
-function is_ssh_socket_alive {
-  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  ssh -o ControlPath="${SSH_SOCKET_PATH}" -O check "${REMOTE_HOST}" 2>/dev/null
-  return $?
-}
 
-function connect_ssh {
-  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  if [ -z "${REMOTE_HOST}" ]; then
-    echo "Fehler: Kein Remote-Host angegeben."
-    exit 1
-  fi
-  if is_ssh_socket_alive; then
-    echo "SSH-Verbindung zu ${REMOTE_HOST} besteht bereits."
-    return 0
-  fi
-  output=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_HOST} true 2>&1)
-  if [[ $? -eq 0 ]]; then
-    echo "Passwortloser Verbindungsaufbau war erfolgreich."
-    establish_ssh_connection "${REMOTE_HOST}" "${SSH_SOCKET_PATH}"
-  elif echo "$output" | grep -q "Permission denied"; then
-    echo "Host ist erreichbar, aber passwortlose Authentifizierung fehlgeschlagen."
-    echo -n "Bitte geben Sie das SSH-Passwort für ${REMOTE_HOST} ein: "
-    read -s USER_PASSWORD
-    echo
-    establish_ssh_connection "${REMOTE_HOST}" "${SSH_SOCKET_PATH}" "$USER_PASSWORD"
-    if [ $? -ne 0 ]; then
-      echo "Verbindung zu ${REMOTE_HOST} konnte nicht hergestellt werden."
-      exit 1
-    fi
-  else
-    echo "Unbekannter Fehler oder Host nicht erreichbar. Ausgabe:"
-    echo "$output"
-  fi
-  echo "SSH-Verbindung zu ${REMOTE_HOST} wurde erfolgreich aufgebaut."
-}
 
-function execute_remote_command {
-  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  local command=$1
-  if [ -z "${command}" ]; then
-    echo "Fehler: Kein Befehl zum Ausführen angegeben."
-    return 1
-  fi
-  ssh -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "${command}"
-  return $?
-}
 
 # Quote a filename for the remote login shell before building a command.
-function shell_quote {
-  local escaped="${1//\'/\'\\\'\'}"
-  printf "'%s'" "${escaped}"
-}
 
-function close_ssh_connection {
-  [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
-  ssh -S "${SSH_SOCKET_PATH}" -O exit "${REMOTE_HOST}"
-  if [ $? -ne 0 ]; then
-    echo "Warnung: Fehler beim Schließen der SSH-Verbindung zu ${REMOTE_HOST}."
-  fi
-}
 
 # Verwaltung der parallelen Vergleichs-Jobs:
 # Jeder Teil-Vergleich wird mit PID und Beschreibung registriert, damit
@@ -151,7 +82,7 @@ function wait_for_jobs {
       failed=$((failed + 1))
     fi
   done
-  if [ "${#JOB_PIDS[@]}" -eq 0 ]; then
+  if [ "${#JOB_PIDS[@]}" -ne "${NUM_JOBS}" ]; then
     echo "Fehler: Es wurden keine Segmente geprüft." >&2
     failed=$((failed + 1))
   fi
@@ -166,22 +97,7 @@ function wait_for_jobs {
   return 0
 }
 
-function cleanup_on_signal {
-  trap - INT TERM
-  echo "Abbruch: Beende laufende Vergleichs-Prozesse ..." >&2
-  local pids
-  pids=$(jobs -p)
-  if [ -n "$pids" ]; then
-    # shellcheck disable=SC2086 # PIDs sind whitespace-getrennt gewollt
-    kill $pids 2>/dev/null
-    wait $pids 2>/dev/null
-  fi
-  if [ $REMOTE -eq 1 ] && is_ssh_socket_alive; then
-    close_ssh_connection
-  fi
-  exit 130
-}
-trap cleanup_on_signal INT TERM
+trap ddpar_cancel INT TERM
 
 function part_bytes {
   # Bytes, die Segment $1 umfasst: normale Segmente SPLIT_SIZE, das letzte
@@ -203,14 +119,14 @@ function local_seg_hash {
   # $1 = Datei/Device (lokal), $2 = Segment-Index. Liefert SHA256 des Segments.
   local f=$1 idx=$2
   local start=$((idx * SPLIT_SIZE))
-  dd if="$f" bs="$BLOCKSIZEBYTES" iflag=count_bytes,skip_bytes count="$(part_bytes "$idx")" skip="$start" status=none | sha256sum | cut -d' ' -f1
+  dd if="$f" bs="$BLOCKSIZEBYTES" "iflag=fullblock,count_bytes,skip_bytes" count="$(part_bytes "$idx")" skip="$start" status=none | sha256sum | cut -d' ' -f1
 }
 
 function remote_seg_hash {
   # $1 = Datei/Device (auf Remote-Host), $2 = Segment-Index. Liefert SHA256 des Segments.
   local f=$1 idx=$2
   local start=$((idx * SPLIT_SIZE))
-  execute_remote_command "dd if=$(shell_quote "${f}") bs=$BLOCKSIZEBYTES iflag=count_bytes,skip_bytes count=$(part_bytes "$idx") skip=$start status=none | sha256sum" | cut -d' ' -f1
+  execute_remote_command "dd if=$(shell_quote "${f}") bs=$BLOCKSIZEBYTES iflag=fullblock,count_bytes,skip_bytes count=$(part_bytes "$idx") skip=$start status=none | sha256sum" | cut -d' ' -f1
 }
 
 function remote_part_hash {
@@ -247,52 +163,46 @@ function require_sha256_files {
   done
 }
 
-function check_restored_image {
-  [ $REMOTE -ne 1 ] && require_sha256_files
-  for ((i=0; i<$NUM_JOBS; i++)); do
-    if [ $REMOTE -eq 1 ]; then
-      # Backup-Teile liegen remote (.part), Ziel ist lokal
-      (
-        h_bak=$(remote_part_hash "$i") || exit 1
-        h_dst=$(local_seg_hash "$OUTPUT_FILE" "$i") || exit 1
-        if [ "$h_bak" = "$h_dst" ]; then
-          echo "Segment $i: OK ($h_bak)"
-        else
-          echo "Segment $i: MISMATCH (backup=$h_bak, destination=$h_dst)"
+# Compare the actual backup bytes as well as any stored digest. Paths never
+# enter sed expressions or checksum filenames, so punctuation remains data.
+function check_backup_pair {
+  local local_file="${1}" label="${2}" i
+  [ "${REMOTE}" -ne 1 ] && require_sha256_files
+  for ((i=0; i<NUM_JOBS; i++)); do
+    # Keep long-lived hash sessions below the default sshd MaxSessions limit.
+    if [ "${REMOTE}" -eq 1 ] && [ "${i}" -ge 4 ]; then wait "${JOB_PIDS[i-4]}" || true; fi
+    (
+      local h_bak h_local expected part_file
+      if [ "${REMOTE}" -eq 1 ]; then
+        h_bak=$(remote_part_hash "${i}") || exit 1
+      else
+        part_file="${BASE_FILES}${i}.part"
+        [ -n "${COMPRESSION}" ] && part_file="${BASE_FILES}${i}.gz"
+        ddpar_verify_part "${part_file}" "$(part_bytes "${i}")" || exit 1
+        expected=$(ddpar_checksum "${BASE_FILES}${i}.sha256") || exit 1
+        h_bak=$(ddpar_part_stream "${part_file}" | sha256sum | cut -d' ' -f1) || exit 1
+        if [ "${h_bak}" != "${expected}" ]; then
+          echo "Segment ${i}: FAILED (backup checksum mismatch)" >&2
           exit 1
         fi
-      ) &
-    else
-      START=$((i * SPLIT_SIZE))
-      echo "dd if=$OUTPUT_FILE bs=$BLOCKSIZEBYTES iflag=count_bytes,skip_bytes count=$(part_bytes "$i") skip=$START status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &"
-      dd if="$OUTPUT_FILE" bs="$BLOCKSIZEBYTES" iflag=count_bytes,skip_bytes count="$(part_bytes "$i")" skip="$START" status=none | sha256sum -c "$BASE_FILES$i.sha256" | sed "s#-#$BASE_FILES$i#" &
-    fi
-    register_job $! "Segment $i (restore-check)"
+      fi
+      h_local=$(local_seg_hash "${local_file}" "${i}") || exit 1
+      if [ "${h_bak}" != "${h_local}" ]; then
+        echo "Segment ${i}: FAILED MISMATCH (backup=${h_bak}, ${label}=${h_local})" >&2
+        exit 1
+      fi
+      echo "Segment ${i}: OK (${h_bak})"
+    ) &
+    register_job $! "Segment ${i} (${label}-check)"
   done
 }
 
+function check_restored_image {
+  check_backup_pair "${OUTPUT_FILE}" destination
+}
+
 function check_backuped_image {
-  [ $REMOTE -ne 1 ] && require_sha256_files
-  for ((i=0; i<$NUM_JOBS; i++)); do
-    if [ $REMOTE -eq 1 ]; then
-      # Quelle ist lokal, Backup-Teile liegen remote (.part)
-      (
-        h_src=$(local_seg_hash "$INPUT_FILE" "$i") || exit 1
-        h_bak=$(remote_part_hash "$i") || exit 1
-        if [ "$h_src" = "$h_bak" ]; then
-          echo "Segment $i: OK ($h_src)"
-        else
-          echo "Segment $i: MISMATCH (source=$h_src, backup=$h_bak)"
-          exit 1
-        fi
-      ) &
-    else
-      START=$((i * SPLIT_SIZE))
-      echo "dd if=$INPUT_FILE bs=$BLOCKSIZEBYTES iflag=count_bytes,skip_bytes count=$(part_bytes "$i") skip=$START status=none | sha256sum -c $BASE_FILES$i.sha256 | sed s#-#$BASE_FILES$i# &"
-      dd if="$INPUT_FILE" bs="$BLOCKSIZEBYTES" iflag=count_bytes,skip_bytes count="$(part_bytes "$i")" skip="$START" status=none | sha256sum -c "$BASE_FILES$i.sha256" | sed "s#-#$BASE_FILES$i#" &
-    fi
-    register_job $! "Segment $i (backup-check)"
-  done
+  check_backup_pair "${INPUT_FILE}" source
 }
 
 function check_cloned_image {
@@ -303,9 +213,9 @@ function check_cloned_image {
   # regular target file before comparing the segments.
   if [[ "${OUTPUT_FILE_TYPE}" != "block special"* ]]; then
     if [ "${REMOTE}" -eq 1 ]; then
-      target_size=$(execute_remote_command "stat -c %s -- $(shell_quote "${DESTINATION}")") || return 1
+      target_size=$(execute_remote_command "stat -Lc %s -- $(shell_quote "${DESTINATION}")") || return 1
     else
-      target_size=$(stat -c %s -- "${DESTINATION}") || return 1
+      target_size=$(stat -Lc %s -- "${DESTINATION}") || return 1
     fi
     if [ "${target_size}" -ne "${INPUT_SIZE}" ]; then
       echo "Fehler: Zieldatei hat ${target_size} Bytes, Quelle ${INPUT_SIZE} Bytes." >&2
@@ -314,6 +224,8 @@ function check_cloned_image {
     fi
   fi
   for ((i=0; i<NUM_JOBS; i++)); do
+    # Keep long-lived hash sessions below the default sshd MaxSessions limit.
+    if [ "${REMOTE}" -eq 1 ] && [ "${i}" -ge 4 ]; then wait "${JOB_PIDS[i-4]}" || true; fi
     (
       HASH_SRC=$(local_seg_hash "$SOURCE" "$i") || exit 1
       if [ $REMOTE -eq 1 ]; then
@@ -333,6 +245,9 @@ function check_cloned_image {
   done
 }
 
+# Normalize aliases while preserving literal option values.
+ddpar_normalize_args "$@"
+set -- "${DDPAR_ARGS[@]}"
 # Verwendung von getopts zur Verarbeitung der Optionen
 while getopts ":b:s:d:j:B:r::R:h" opt; do
   case $opt in
@@ -353,7 +268,7 @@ while getopts ":b:s:d:j:B:r::R:h" opt; do
       case "${OPTARG}" in
         n|"") REMOTE_MODE="n";;
         c)    REMOTE_MODE="c";;
-        l)    REMOTE_MODE="n";;
+        l) echo "Error: unsupported remote mode l." >&2; exit 2;;
         -*)
           # "-r" ohne Modus: getopts hat bereits die nächste Option als Argument
           # gelesen. OPTIND zurücksetzen, damit sie regulär verarbeitet wird.
@@ -372,8 +287,8 @@ while getopts ":b:s:d:j:B:r::R:h" opt; do
         REMOTE_HOST="${OPTARG}"
       fi
       ;;
-    h|-help) show_help; exit 0;;
-    \?) echo "Ungültige Option: -$OPTARG";;
+    h) show_help; exit 0;;
+    \?) echo "Unknown option: -${OPTARG}" >&2; exit 2;;
     :)
       # -r darf ohne Argument stehen (Default-Modus n), alle anderen Optionen nicht
       if [ "$OPTARG" = "r" ]; then
@@ -386,15 +301,20 @@ while getopts ":b:s:d:j:B:r::R:h" opt; do
       ;;
   esac
 done
+shift "$((OPTIND - 1))"
+if [ "$#" -ne 0 ]; then
+  echo "Error: unexpected argument: ${1}" >&2
+  exit 2
+fi
 
 # Basis-Pfad auflösen: bei Remote nicht via realpath (Pfad liegt auf dem Remote-Host)
 if [ -n "$BASE_ARG" ]; then
   if [ $REMOTE -eq 1 ]; then
-    BASE_PATH=$(dirname "$BASE_ARG")
-    BASE_FILE_NAME=$(basename "$BASE_ARG")
+    BASE_PATH=$(dirname -- "$BASE_ARG")
+    BASE_FILE_NAME=$(basename -- "$BASE_ARG")
   else
-    BASE_PATH=$(dirname "$(realpath "$BASE_ARG")")
-    BASE_FILE_NAME=$(basename "$(realpath "$BASE_ARG")")
+    BASE_PATH=$(dirname -- "$(realpath -- "${BASE_ARG}")")
+    BASE_FILE_NAME=$(basename -- "$(realpath -- "${BASE_ARG}")")
   fi
   echo "Set BASE_PATH=${BASE_PATH}"
   echo "Set BASE_FILE_NAME=${BASE_FILE_NAME}"
@@ -402,7 +322,7 @@ fi
 
 # Bei Remote-Check früh die SSH-Verbindung aufbauen
 if [ $REMOTE -eq 1 ]; then
-  connect_ssh
+  connect_ssh || exit 1
 fi
 
 # Überprüfung der erforderlichen Parameter
@@ -431,7 +351,7 @@ if [ -n "$SOURCE" ] && [ -n "$BASE_PATH" ] && [ -n "$DESTINATION" ]; then
 fi
 
 # Create spinoff variables
-if [ ! -z "${BASE_PATH}" ]; then
+if [ -n "${BASE_PATH}" ]; then
   BASE_FILES="${BASE_PATH}/${BASE_FILE_NAME}-"
   METADATA_FILE="${BASE_FILES}metadata.txt"
 
@@ -452,22 +372,8 @@ if [ ! -z "${BASE_PATH}" ]; then
       exit 1
     fi
   fi
-  NUM_JOBS=$(grep "^NUM_JOBS=" "$META_SRC" | cut -d "=" -f 2)
-  SPLIT_SIZE=$(grep "^SPLIT_SIZE=" "$META_SRC" | cut -d "=" -f 2)
-  INPUT_SIZE=$(grep "^INPUT_SIZE=" "$META_SRC" | cut -d "=" -f 2)
-  BASE_FILE_TYPE=$(grep "^FILE_TYPE=" "$META_SRC" | cut -d "=" -f 2)
-  BLOCKSIZEBYTES=$(grep "^BLOCKSIZEBYTES=" "$META_SRC" | cut -d "=" -f 2)
-  COMPRESSION=$(grep "^COMPRESSION=" "$META_SRC" | cut -d "=" -f 2)
-  # Ältere Metadatendateien ohne INPUT_SIZE: glatte Teilung annehmen
-  if [ -z "$INPUT_SIZE" ] && [[ "${SPLIT_SIZE}" =~ ^[1-9][0-9]*$ && "${NUM_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
-    INPUT_SIZE=$((SPLIT_SIZE * NUM_JOBS))
-  fi
-  if ! [[ "${NUM_JOBS}" =~ ^[1-9][0-9]*$ && "${BLOCKSIZEBYTES}" =~ ^[1-9][0-9]*$ &&
-          "${INPUT_SIZE}" =~ ^[0-9]+$ && "${SPLIT_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Fehler: Ungültige numerische Backup-Metadaten." >&2
-    exit 1
-  fi
-  [ $REMOTE -eq 1 ] && rm -f "$META_SRC"
+  ddpar_read_metadata "${META_SRC}" || exit 1
+  [ "${REMOTE}" -eq 1 ] && rm -f -- "${META_SRC}"
 
   # Komprimierte Remote-Backups werden im Modus "n" lokal ausgepackt (local
   # decompression), im Modus "c" auf der Gegenseite. zcat muss also auf der
@@ -487,11 +393,11 @@ if [ ! -z "${BASE_PATH}" ]; then
   fi
 
   # Debug Info:
-  echo ${BASE_PATH}
-  echo ${BASE_FILE_NAME}
-  echo ${BASE_FILES}\*
+  printf '%s\n' "${BASE_PATH}"
+  printf '%s\n' "${BASE_FILE_NAME}"
+  printf '%s\n' "${BASE_FILES}*"
 fi
-if [ ! -z "$SOURCE" ]; then
+if [ -n "$SOURCE" ]; then
   # Leserechte vorab prüfen, damit die Prüfung nicht erst mitten im
   # parallelen Lauf an fehlenden Rechten scheitert.
   if [ ! -r "$SOURCE" ]; then
@@ -499,22 +405,45 @@ if [ ! -z "$SOURCE" ]; then
     exit 1
   fi
   INPUT_FILE=$SOURCE
-  INPUT_FILE_TYPE="$(file -b -- "${SOURCE}")"
+  INPUT_FILE_TYPE="$(file -Lb -- "${SOURCE}")"
 fi
-if [ ! -z "$DESTINATION" ]; then
+if [ -n "$DESTINATION" ]; then
   OUTPUT_FILE=$DESTINATION
   # Beim Remote-Clone-Check (kein BASE_PATH) liegt das Ziel remote -> file -b nicht lokal aufrufen
   if [ $REMOTE -eq 1 ] && [ -z "${BASE_PATH}" ]; then
-    OUTPUT_FILE_TYPE=$(execute_remote_command "file -b -- $(shell_quote "${DESTINATION}")")
+    OUTPUT_FILE_TYPE=$(execute_remote_command "file -Lb -- $(shell_quote "${DESTINATION}")")
   else
     if [ ! -r "$DESTINATION" ]; then
       echo "Fehler: Ziel $DESTINATION existiert nicht oder ist nicht lesbar."
       exit 1
     fi
-    OUTPUT_FILE_TYPE="$(file -b -- "${DESTINATION}")"
+    OUTPUT_FILE_TYPE="$(file -Lb -- "${DESTINATION}")"
   fi
 fi
 
+
+# Metadata describes the entire input. Refuse shorter or longer regular
+# partners even if all compared prefixes would have matched.
+for partner in "${SOURCE:-}" "${DESTINATION:-}"; do
+  [ -z "${partner}" ] && continue
+  if [ "${REMOTE}" -eq 1 ] && [ -z "${BASE_PATH}" ] && [ "${partner}" = "${DESTINATION:-}" ]; then continue; fi
+  if [ ! -f "${partner}" ] && [ ! -b "${partner}" ]; then
+    echo "Error: unsupported comparison input: ${partner}" >&2
+    exit 1
+  fi
+  if [ -n "${BASE_PATH}" ]; then
+    if [ -b "${partner}" ]; then
+      partner_size=$(blockdev --getsize64 "${partner}") || exit 1
+      [ "${partner_size}" -ge "${INPUT_SIZE}" ] || exit 1
+    else
+      partner_size=$(stat -Lc %s -- "${partner}") || exit 1
+      if [ "${partner_size}" -ne "${INPUT_SIZE}" ]; then
+        echo 'Error: FAILED comparison size differs from backup metadata.' >&2
+        exit 1
+      fi
+    fi
+  fi
+done
 
 # Old Debug Info, can be removed
 #echo "BASE_FILE_TYPE: ${BASE_FILE_TYPE}"
@@ -522,7 +451,7 @@ fi
 #echo "OUTPUT_FILE: ${OUTPUT_FILE}"
 #echo "OUTPUT_FILE_TYPE: ${OUTPUT_FILE_TYPE}"
 
-if [ ! -z "$SOURCE" ] && [ ! -z "$BASE_PATH" ] && [ -z "$DESTINATION" ]; then
+if [ -n "$SOURCE" ] && [ -n "$BASE_PATH" ] && [ -z "$DESTINATION" ]; then
   echo "Comparing Source $SOURCE with $BASE_PATH ..."
 fi
 
@@ -551,7 +480,7 @@ if [ -n "$SOURCE" ] && [ -z "$BASE_PATH" ] && [ -n "$DESTINATION" ]; then
   if [[ "${INPUT_FILE_TYPE}" == "block special"* ]]; then
     INPUT_SIZE=$(blockdev --getsize64 "$SOURCE")
   else
-    INPUT_SIZE=$(stat -c %s "$SOURCE")
+    INPUT_SIZE=$(stat -Lc %s "$SOURCE")
   fi
   # Gleiche Aufteilung wie beim Clone-Vorgang (ddpar.sh size_calculation):
   # SPLIT_SIZE auf Blockgröße abgerundet, das letzte Segment prüft den Rest.
@@ -559,9 +488,15 @@ if [ -n "$SOURCE" ] && [ -z "$BASE_PATH" ] && [ -n "$DESTINATION" ]; then
     echo "Fehler: -j und -B müssen positive ganze Zahlen sein." >&2
     exit 2
   fi
-  SPLIT_SIZE=$(( (INPUT_SIZE / (NUM_JOBS * BLOCKSIZEBYTES)) * BLOCKSIZEBYTES ))
+  ddpar_geometry || exit 2
+  ddpar_uint "${INPUT_SIZE}" || exit 1
+  SPLIT_SIZE=$(( (INPUT_SIZE / NUM_JOBS / BLOCKSIZEBYTES) * BLOCKSIZEBYTES ))
   [ "$SPLIT_SIZE" -eq 0 ] && SPLIT_SIZE=$BLOCKSIZEBYTES
 
+  if [ "${NUM_JOBS}" -gt "$((9223372036854775807 / SPLIT_SIZE))" ]; then
+    echo 'Error: segment offsets exceed the supported range.' >&2
+    exit 2
+  fi
   echo "Beginning to check ..."
   check_cloned_image || INTERNAL_EXITCODE=1
 fi
