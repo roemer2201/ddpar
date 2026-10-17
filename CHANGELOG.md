@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased] – Nachkorrekturen zum vollständigen Review
+
+- `ddpar.sh` prüfte den Backup-Basisnamen wegen eines überzähligen `--` nicht; Namen mit Zeilenumbruch werden jetzt abgelehnt.
+- Lange Aliase werden anhand des getopts-Strings des jeweiligen Skripts normalisiert statt anhand von `$0`; Werte nach `-s`/`-d` bleiben auch bei Aufruf ohne `.sh`-Endung unverändert.
+- Einstiegsskripte lösen Symlinks auf und finden `ddpar-common.sh` neben dem eigentlichen Skript.
+- `ddpar-check.sh -r` mit mehr als vier Jobs wartete zweimal auf dieselbe PID; ob ein zweites `wait` den Status einer bereits abgeholten PID noch liefert, ist nicht in jeder Bash-Version gesichert (sonst Exit 127 als Fehler). Der Exit-Status wird jetzt beim Drosseln gespeichert.
+- Abbruch: Ohne lesbare `/proc/<pid>/status` wird keine unübersetzte PID aus einem anderen PID-Namespace signalisiert.
+- Clone-Check übergibt die Quelle mit `--` an `stat`; zu kleine Blockgeräte werden mit Meldung statt stumm abgelehnt.
+- Mindestversion Bash 4.4 dokumentiert; verwaiste Kommentare und Tippfehler entfernt.
+
+## [Unreleased] – Vollständiges Review vom 17.10.2026
+
+- Lokale Checks lesen tatsächliche Backup-Teile und prüfen Länge, gzip-CRC sowie Prüfsummen.
+- Restore prüft alle Rohdatenlängen und verfügbare lokale SHA256-Dateien vor dem Schreiben; Dateiziele werden exakt gekürzt, leere Abbilder unterstützt.
+- Clone schützt vorhandene Dateien auch unter Verzeichniszielen; neue Dateiziele und Symlinks funktionieren mit korrekten Größen. Backup-/Restore-Aliase werden abgelehnt.
+- Gemeinsamer Parser in `ddpar-common.sh` validiert Metadaten, Basenamen, Duplikate und Arithmetikgrenzen; alle vier Skripte gemeinsam ausliefern.
+- Prüfsummen-Jobs werden vollständig gewartet. Neue Backups bleiben bis zum erfolgreichen Abschluss `incomplete`; erneute Backups ohne `-s` entfernen alte Sidecars.
+- Private SSH-Control-Sockets je Lauf, Alias-Auflösung, explizites Remote-`pipefail`, höchstens vier gleichzeitige Hash-Sitzungen und Fehlerweitergabe bei Verbindungsaufbau.
+- Clone-/Restore-Schreiber zählen tatsächliche Bytes; Remote-Prozessgruppen und lokale Prozessbäume werden bei Abbruch beendet. Zombie-Wrapper gelten als fehlgeschlagen.
+- netcat-Clients erhalten ein Inaktivitätslimit (Default 300 s, `DDPAR_NETWORK_TIMEOUT`), SSH erkennt tote Verbindungen per Keepalive.
+- `-r l` wird abgelehnt, statt unverschlüsselt fortzusetzen. Dokumentierte lange CLI-Aliase funktionieren; unbekannte Optionen und zusätzliche Argumente führen zum Fehler.
+- Regressionstests und Dokumentation ergänzt; vollständiges ShellCheck-Ergebnis ist nun verbindliches CI-Gate.
+
 ## [Unreleased] – Review-Korrekturen
 
 - Lokale Pfade werden ohne `eval` als Argumente übergeben; Remote-Pfade werden

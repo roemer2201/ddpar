@@ -21,7 +21,7 @@ make test              # bats-Testsuite (Integrationstests skippen ohne root/SSH
 make test-integration  # nur Blockgerät- + Remote-Tests (root bzw. SSH nötig)
 make lint              # ShellCheck, voller Report (alle Schweregrade)
 make lint-gate         # ShellCheck, nur build-relevante Fehler (CI-Gate)
-make check             # lint-gate + test (was der schnelle CI-Job prüft)
+make check             # lint + test (was der schnelle CI-Job prüft)
 ```
 
 Tests, deren Voraussetzungen fehlen, werden automatisch übersprungen (`skip`),
@@ -51,8 +51,10 @@ sodass `make test` auch ohne root/SSH grün bleibt.
   SSH-Verbindung werden die Tests übersprungen, ohne `gzip` auf dem Testhost
   nur die `-r c`-Tests. Weitere Fälle decken Remote-Schreibfehler und Pfade mit
   Apostroph beziehungsweise wörtlicher Command Substitution ab.
+- `integrity.bats` – kleine/leere Eingaben, beschädigte Teile, gzip-Länge/CRC,
+  Zielschutz und Symlinks, Metadaten, Worker-Fehler, Abbruch sowie CLI-Fehler.
 - `helpers.bash` – gemeinsames `setup`/`teardown` (isoliertes Temp-Verzeichnis,
-  automatisches Lösen von Loop-Devices/SSH-Socket) sowie `make_testfile`,
+  automatisches Lösen von Loop-Devices) sowie `make_testfile`,
   `loop_setup`, `require_block_support`, `require_remote_support`,
   `require_remote_gzip`.
 
@@ -72,3 +74,8 @@ root aus (siehe `.github/workflows/ci.yml`).
   [`../TESTING.md`](../TESTING.md).
 - Unit-Tests einzelner Funktionen (z. B. `size_calculation`); dafür müsste der
   Hauptteil der Skripte sourcebar gekapselt werden.
+
+Remote-Regressionen prüfen außerdem gzip-CRC-Fehler trotz identischer Rohdaten,
+12 parallele Segmente beim Check und gleichzeitige unabhängige Aufrufe.
+Alle drei CI-Jobs müssen erfolgreich sein; übersprungene Integrationstests im
+lokalen Lauf ersetzen keinen erfolgreichen SSH-/Blockgeräte-Job.

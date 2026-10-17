@@ -11,6 +11,8 @@
 # read-only aus dem Repo-Root in die Container gemountet, ein Rebuild ist nach
 # Skriptänderungen also nicht nötig (--no-build nutzen).
 #
+# Version: 1.0.1 (2026-10-17)
+#
 # Verwendung:
 #   ./run-remote-tests.sh [--no-build] [--keep] [--verbose] [-h]
 #
@@ -48,7 +50,12 @@ RC=0
 info() { echo "==> $*"; }
 pass() { echo "[PASS] $*"; }
 fail() { echo "[FAIL] $*"; RC=1; }
-vshow() { [ "$VERBOSE" -eq 1 ] && echo "$1" | sed 's/^/    /' || true; }
+# Indent multiline diagnostics without masking a failed command.
+vshow() {
+  if [ "${VERBOSE}" -eq 1 ]; then
+    printf '    %s\n' "${1//$'\n'/$'\n    '}"
+  fi
+}
 
 # shellcheck disable=SC2317  # Funktionsrumpf wird via trap aufgerufen
 cleanup() {

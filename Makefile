@@ -1,4 +1,4 @@
-SCRIPTS := ddpar.sh ddpar-restore.sh ddpar-check.sh
+SCRIPTS := ddpar.sh ddpar-restore.sh ddpar-check.sh ddpar-common.sh testing-docker/*.sh
 
 .PHONY: lint lint-gate test test-verbose test-log test-integration check install-deps help
 
@@ -11,13 +11,13 @@ help:
 	@echo "  make test-verbose      wie test, gibt Kommandos + Output live aus (DDPAR_VERBOSE=1)"
 	@echo "  make test-log          wie test, schreibt Kommandos + Output nach /tmp/ddpar-test.log"
 	@echo "  make test-integration  Nur Blockgerät- (losetup) und Remote-Tests (SSH/netcat)"
-	@echo "  make check             lint-gate + test (alles, was der schnelle CI-Job prüft)"
+	@echo "  make check             lint + test (vollständiger Lint-Report und Tests)"
 	@echo "  make install-deps      ShellCheck, bats und netcat installieren (Debian/Ubuntu)"
 
 lint:
 	@command -v shellcheck > /dev/null 2>&1 || \
 		{ echo "shellcheck nicht gefunden. Installation: make install-deps"; exit 1; }
-	shellcheck $(SCRIPTS)
+	shellcheck -x $(SCRIPTS)
 
 # Build-relevantes Gate: nur echte Fehler (severity=error) lassen die CI scheitern.
 # Schwelle kann später auf "warning"/"style" verschärft werden, sobald die im
@@ -25,7 +25,7 @@ lint:
 lint-gate:
 	@command -v shellcheck > /dev/null 2>&1 || \
 		{ echo "shellcheck nicht gefunden. Installation: make install-deps"; exit 1; }
-	shellcheck --severity=error $(SCRIPTS)
+	shellcheck -x --severity=error $(SCRIPTS)
 
 test:
 	@command -v bats > /dev/null 2>&1 || \
@@ -49,7 +49,7 @@ test-integration:
 		{ echo "bats nicht gefunden. Installation: make install-deps"; exit 1; }
 	bats tests/blockdev.bats tests/remote.bats
 
-check: lint-gate test
+check: lint test
 
 install-deps:
 	sudo apt-get install -y shellcheck bats netcat-openbsd

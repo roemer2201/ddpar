@@ -1,5 +1,8 @@
 # Code-Review: ddpar
 
+> Historischer Review vom 26.09.2026. Das aktuelle vollständige Review und die
+> zugehörigen Korrekturen sind in [CODEX-REVIEW.md](CODEX-REVIEW.md) dokumentiert.
+
 Stand: `main` bei Commit `8ded04a49b211027c67a6a4939b16bb9e7649d7c` (26.09.2026). Geprüft wurden die drei ausführbaren Hauptskripte, die Tests, der CI-Workflow und die Projektdokumentation. Der Schwerpunkt liegt auf Datenintegrität, Rückgabestatus und Remote-Fehlern.
 
 ## Befunde
