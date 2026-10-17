@@ -5,7 +5,7 @@
 #   2. Select value completion from the command and local/remote context.
 #   3. Return candidates without executing ddpar or contacting remote hosts.
 # Usage: source completions/ddpar (after loading bash-completion >= 2.1).
-# Version: 1.0.0 (2026-10-17)
+# Version: 1.0.1 (2026-10-17)
 
 # Offer directories and backup bases, not individual part/checksum files.
 # Metadata is only used as a filename marker; its contents are never executed.
@@ -28,11 +28,28 @@ _ddpar_backup_bases()
     return 0
 }
 
+# Readline replaces only the text after the last = or : in COMP_WORDBREAKS,
+# so strip that part of the whole word from each candidate. Otherwise a file
+# such as db-12:00.img would be inserted as db-12:db-12:00.img.
+_ddpar_trim()
+{
+    local word="${1}" breaks='' head='' i
+    [[ "${COMP_WORDBREAKS}" == *'='* ]] && breaks+='='
+    [[ "${COMP_WORDBREAKS}" == *':'* ]] && breaks+=':'
+    [[ -n "${breaks}" && "${word}" == *["${breaks}"]* ]] || return 0
+    head="${word%"${word##*["${breaks}"]}"}"
+    for i in "${!COMPREPLY[@]}"; do
+        COMPREPLY[i]="${COMPREPLY[i]#"${head}"}"
+    done
+}
+
 # Complete all executable tools; ddpar-common.sh and entrypoint.sh are helpers.
 _ddpar()
 {
     local cur prev words cword
-    _init_completion -n : || return
+    # Keep = and : inside the word so paths like a=b.img or db-12:00.img match.
+    _init_completion -n =: || return
+    local full_cur="${cur}"
     local tool="${words[0]##*/}"
     tool="${tool%.sh}"
     local required flags options
@@ -182,6 +199,7 @@ _ddpar()
             COMPREPLY[i]="${prefix}${COMPREPLY[i]}"
         done
     fi
+    _ddpar_trim "${full_cur}"
     return 0
 }
 

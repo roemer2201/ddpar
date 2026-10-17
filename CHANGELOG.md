@@ -1,21 +1,27 @@
 # Changelog
 
-## [1.1.0] - Debian packaging
+## [1.1.0] – Bash-Completion und Debian-Paket
 
-- Add rootless Debian package builds (`make deb`, debhelper compat 13), runtime
-  dependencies and installed entry points with and without the .sh suffix.
-- Ship the shared library privately alongside the commands, install Bash
-  completion with lazy-loading aliases, and provide manual pages and docs.
-- Add an installed-package smoke test, autopkgtest metadata and a CI build
-  that checks the package and publishes its .deb as a workflow artifact.
+### Bash-Completion
 
-## [Unreleased] - Bash completion
+- Kontextabhängige Completion für `ddpar`, `ddpar-restore`, `ddpar-check`, ihre
+  `.sh`-Namen und den Docker-Test-Runner: Optionen je Parser, Kurzoptions-Cluster,
+  angehängte Werte, SSH-Hosts, Dateien/Blockgeräte, Backup-Basisnamen und die
+  implementierten Modi. Tab startet weder eine Übertragung noch eine SSH-Verbindung.
+- Pfade mit `:` oder `=` (z. B. `db-12:00.img`) werden korrekt ergänzt; zuvor
+  verdoppelte Readline den Teil vor dem Trennzeichen (`db-12:db-12:00.img`).
+- Regressionstests (bats und echte Readline-Tab-Eingaben über ein PTY) sowie
+  ShellCheck-/CI-Abdeckung.
 
-- Context-sensitive Bash completion for all three commands and the Docker test
-  runner, including aliases, short-option clusters, attached values, SSH hosts,
-  files/devices, backup bases and supported modes. Completion never starts a
-  transfer or opens an SSH connection.
-- Automated completion regression tests and ShellCheck/CI coverage.
+### Debian-Paket
+
+- Natives Paket ohne root bauen (`make deb`, debhelper-Compat 13) mit
+  Laufzeitabhängigkeiten und Aufrufnamen mit und ohne `.sh`.
+- Gemeinsame Bibliothek privat unter `/usr/lib/ddpar`, automatisch ladbare
+  Completions, Handbuchseiten und Dokumentation.
+- Smoke-Test für das installierte Paket, als autopkgtest registriert
+  (`allow-stderr`, da `dd` seine Statistik auf stderr ausgibt), und CI-Job, der
+  das Paket baut, mit Lintian prüft und das `.deb` als Artefakt bereitstellt.
 
 ## [Unreleased] – Nachkorrekturen zum vollständigen Review
 

@@ -257,6 +257,28 @@ has_reply() {
     [ "${#COMPREPLY[@]}" -eq 0 ]
 }
 
+@test "colons and equals signs in paths are trimmed to the Readline word" {
+    touch 'db-12:00.img' 'a=b.img' 'backup dir/host:disk-metadata.txt'
+    COMP_WORDS=(ddpar -i db-12 : 0)
+    COMP_CWORD=4
+    COMP_LINE='ddpar -i db-12:0'
+    COMP_POINT="${#COMP_LINE}"
+    _ddpar || :
+    [ "${COMPREPLY[*]}" = '00.img' ]
+    COMP_WORDS=(ddpar -i a = b)
+    COMP_CWORD=4
+    COMP_LINE='ddpar -i a=b'
+    COMP_POINT="${#COMP_LINE}"
+    _ddpar || :
+    [ "${COMPREPLY[*]}" = 'b.img' ]
+    COMP_WORDS=(ddpar-check '-bbackup dir/host' : d)
+    COMP_CWORD=3
+    COMP_LINE='ddpar-check -bbackup dir/host:d'
+    COMP_POINT="${#COMP_LINE}"
+    _ddpar || :
+    [ "${COMPREPLY[*]}" = 'disk' ]
+}
+
 @test "completion leaves caller working directory and shell options intact" {
     local original_pwd="${PWD}" original_options
     original_options="$(set +o; shopt -p)"

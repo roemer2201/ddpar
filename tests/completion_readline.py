@@ -36,6 +36,8 @@ class ReadlineCompletion(unittest.TestCase):
             (root / "backup dir/disk image-metadata.txt").touch()
             (root / "$(touch INJECTED)-metadata.txt").touch()
             (root / "quote' image-metadata.txt").touch()
+            (root / "db-12:00.img").touch()
+            (root / "a=b.img").touch()
             self.pid, self.fd = pty.fork()
             if self.pid == 0:
                 env = dict(os.environ, INPUTRC="/dev/null", TERM="dumb")
@@ -65,6 +67,9 @@ class ReadlineCompletion(unittest.TestCase):
                     ("ddpar -r -o input", "ddpar -r -o input"),
                     ("ddpar -- input", "ddpar -- input"),
                     ("ddpar-restore -i quote", "ddpar-restore -i quote\\'\\ image "),
+                    ("ddpar -i db-12:0", "ddpar -i db-12:00.img "),
+                    ("ddpar -idb-12:0", "ddpar -idb-12:00.img "),
+                    ("ddpar -i a=b", "ddpar -i a=b.img "),
                 ]
                 for typed, expected in cases:
                     with self.subTest(typed=typed):
