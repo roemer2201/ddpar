@@ -1,4 +1,4 @@
-SCRIPTS := ddpar.sh ddpar-restore.sh ddpar-check.sh ddpar-common.sh testing-docker/*.sh
+SCRIPTS := ddpar.sh ddpar-restore.sh ddpar-check.sh ddpar-common.sh testing-docker/*.sh completions/ddpar
 
 .PHONY: lint lint-gate test test-verbose test-log test-integration check install-deps help
 
@@ -52,4 +52,4 @@ test-integration:
 check: lint test
 
 install-deps:
-	sudo apt-get install -y shellcheck bats netcat-openbsd
+	sudo apt-get install -y shellcheck bats bash-completion python3 netcat-openbsd

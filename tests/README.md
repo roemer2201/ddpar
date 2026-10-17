@@ -11,7 +11,7 @@ Remote- (SSH/netcat) und Blockgerät-Szenarien.
 ## Voraussetzungen
 
 ```sh
-make install-deps        # shellcheck, bats, netcat-openbsd (Debian/Ubuntu)
+make install-deps        # shellcheck, bats, bash-completion, python3, netcat-openbsd
 ```
 
 ## Ausführen
@@ -31,6 +31,11 @@ sodass `make test` auch ohne root/SSH grün bleibt.
 
 - `cli.bats` – Verhalten der Kommandozeile: Hilfe (`-h`), `-y`-Flag,
   fehlende/ungültige Parameter.
+- `completion.bats` und `completion_readline.py` - Optionen je Tool,
+  Optionskombinationen, lokale/entfernte Pfade, Backup-Basisnamen und SSH-Hosts.
+  Ein Test startet Bash in einem Pseudoterminal und prueft echte Tab-Eingaben
+  mit Leerzeichen, Quotes und angehaengten Optionswerten. Python 3 verwendet
+  dafuer ausschliesslich seine Standardbibliothek.
 - `roundtrip.bats` – End-to-End auf Datei-Basis (kein sudo nötig):
   `backup` → `check` → `restore`, Vergleich Original vs. Wiederhergestellt,
   jeweils komprimiert und unkomprimiert, plus eine Negativ-Probe (manipuliertes

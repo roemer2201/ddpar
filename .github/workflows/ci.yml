@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y bats netcat-openbsd
+        run: sudo apt-get update && sudo apt-get install -y bats bash-completion python3 netcat-openbsd
 
       # Blockgerät- und Remote-Tests überspringen sich hier mangels root/SSH
       # automatisch; sie laufen im dedizierten integration-Job.

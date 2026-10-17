@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] - Bash completion
+
+- Context-sensitive Bash completion for all three commands and the Docker test
+  runner, including aliases, short-option clusters, attached values, SSH hosts,
+  files/devices, backup bases and supported modes. Completion never starts a
+  transfer or opens an SSH connection.
+- Automated completion regression tests and ShellCheck/CI coverage.
+
 ## [Unreleased] – Nachkorrekturen zum vollständigen Review
 
 - `ddpar.sh` prüfte den Backup-Basisnamen wegen eines überzähligen `--` nicht; Namen mit Zeilenumbruch werden jetzt abgelehnt.

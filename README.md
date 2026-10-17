@@ -29,6 +29,38 @@ werden aufgelöst; die Hilfsdatei wird neben dem eigentlichen Skript gesucht.
   `setsid` (util-linux), ein beschreibbares `/tmp` für die Statusdateien und
   `gzip` bei `-r c` (bei `-r n` **nicht** nötig)
 
+## Bash-Completion
+
+Mit installiertem `bash-completion` (ab 2.1) kann die Completion im Checkout
+direkt geladen werden:
+
+```bash
+source /usr/share/bash-completion/bash_completion
+source completions/ddpar
+```
+
+Fuer dauerhaftes Laden ohne root-Rechte alle Dateien und Symlinks aus
+`completions/` nach `${BASH_COMPLETION_USER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion}/completions/`
+kopieren. Diese Verzeichnisse bei Bedarf zuerst anlegen. Bash-Completion muss
+in der interaktiven Shell aktiviert sein; danach wird beim ersten Tab geladen.
+
+Unterstuetzt werden `ddpar`, `ddpar-restore`, `ddpar-check`, ihre `.sh`-Namen
+und das Entwicklerwerkzeug `testing-docker/run-remote-tests.sh`. Die eingelesene
+Bibliothek `ddpar-common.sh` und der Container-Entrypoint haben keine Benutzer-CLI.
+Die Completion bietet alle vom jeweiligen Parser unterstuetzten Optionen,
+`clone`/`backup`, die implementierten Remote-Modi `n`/`c`, Zahlenvorschlaege,
+lokale Dateien/Blockgeraete und SSH-Hosts (auch `user@host`) an. Zahlenvorschlaege
+begrenzen die zulaessigen Werte nicht. Kurzoptionen mit angehaengten Werten und
+Flag-Kombinationen werden ebenfalls erkannt.
+
+Restore-Eingaben (`-i`/`--input`) und Check-Backups (`-b`) vervollstaendigen
+den Basisnamen aus `*-metadata.txt`, einschliesslich Verzeichnissen zum
+Navigieren. Im Backup-Modus bietet `ddpar -o` Verzeichnisse an; `-n` erwartet
+einen frei gewaehlten Namen. Remote-Pfade muessen von Hand eingegeben werden;
+Tab startet weder SSH-Verbindungen noch eines der ddpar-Programme. Dafuer
+`-r`/`-R` vor dem jeweiligen Remote-Pfad angeben. Nach `--` werden keine
+Argumente vorgeschlagen, da die Programme keine Positionsargumente akzeptieren.
+
 ## Schnellstart
 
 ```bash
