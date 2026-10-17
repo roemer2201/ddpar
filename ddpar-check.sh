@@ -1,15 +1,16 @@
 #!/bin/bash
 #
 # Compare segmented backups or clones against their source or destination.
-# Version: 1.0.1 (2026-10-17)
+# Version: 1.0.2 (2026-10-17)
 # Flow: parse and validate inputs; hash each segment; report every job's status.
 
 # Fehler in dd-/sha256sum-Pipelines sollen den Exit-Code der Pipeline
 # bestimmen — so führt ein fehlgeschlagener Vergleich (sha256sum -c) zu
 # einem Fehler-Exit des jeweiligen Teil-Jobs.
 set -o pipefail
+# Resolve symlinked entry points (e.g. /usr/local/bin/ddpar) to the install dir.
 # shellcheck source=ddpar-common.sh
-source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ddpar-common.sh" || exit 1
+source "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/ddpar-common.sh" || exit 1
 
 # Set the input and output file names
 #OUTPUT_PATH=/dev
@@ -55,16 +56,15 @@ function show_help {
 
 
 
-
-# Quote a filename for the remote login shell before building a command.
-
-
 # Verwaltung der parallelen Vergleichs-Jobs:
 # Jeder Teil-Vergleich wird mit PID und Beschreibung registriert, damit
 # wait_for_jobs die Exit-Codes einzeln einsammeln kann. So endet das Skript
 # mit Exit-Code != 0, sobald ein Segment nicht übereinstimmt.
 JOB_PIDS=()
 JOB_LABELS=()
+# Exit codes of jobs already reaped by the MaxSessions throttle. A second wait
+# on a reaped PID is not reliable across Bash versions (it may return 127).
+JOB_RCS=()
 
 function register_job {
   JOB_PIDS+=("$1")
@@ -75,9 +75,13 @@ function wait_for_jobs {
   local failed=0
   local i rc
   for i in "${!JOB_PIDS[@]}"; do
-    wait "${JOB_PIDS[$i]}"
-    rc=$?
-    if [ $rc -ne 0 ]; then
+    if [ -n "${JOB_RCS[i]+set}" ]; then
+      rc=${JOB_RCS[i]}
+    else
+      wait "${JOB_PIDS[$i]}"
+      rc=$?
+    fi
+    if [ "${rc}" -ne 0 ]; then
       echo "Fehler: ${JOB_LABELS[$i]} meldet Abweichung oder Lesefehler (Exit-Code ${rc})."
       failed=$((failed + 1))
     fi
@@ -88,6 +92,7 @@ function wait_for_jobs {
   fi
   JOB_PIDS=()
   JOB_LABELS=()
+  JOB_RCS=()
   if [ $failed -gt 0 ]; then
     echo "Prüfung FEHLGESCHLAGEN: ${failed} Segment(e) weichen ab oder konnten nicht gelesen werden."
     INTERNAL_EXITCODE=1
@@ -113,6 +118,17 @@ function part_bytes {
   else
     echo "${SPLIT_SIZE}"
   fi
+}
+
+# Keep at most four long-lived hash sessions below the default sshd
+# MaxSessions limit; remember the reaped exit code for wait_for_jobs.
+function throttle_remote_jobs {
+  local idx=$(( ${1} - 4 ))
+  if [ "${REMOTE}" -eq 1 ] && [ "${idx}" -ge 0 ]; then
+    wait "${JOB_PIDS[idx]}"
+    JOB_RCS[idx]=$?
+  fi
+  return 0
 }
 
 function local_seg_hash {
@@ -169,8 +185,7 @@ function check_backup_pair {
   local local_file="${1}" label="${2}" i
   [ "${REMOTE}" -ne 1 ] && require_sha256_files
   for ((i=0; i<NUM_JOBS; i++)); do
-    # Keep long-lived hash sessions below the default sshd MaxSessions limit.
-    if [ "${REMOTE}" -eq 1 ] && [ "${i}" -ge 4 ]; then wait "${JOB_PIDS[i-4]}" || true; fi
+    throttle_remote_jobs "${i}"
     (
       local h_bak h_local expected part_file
       if [ "${REMOTE}" -eq 1 ]; then
@@ -224,8 +239,7 @@ function check_cloned_image {
     fi
   fi
   for ((i=0; i<NUM_JOBS; i++)); do
-    # Keep long-lived hash sessions below the default sshd MaxSessions limit.
-    if [ "${REMOTE}" -eq 1 ] && [ "${i}" -ge 4 ]; then wait "${JOB_PIDS[i-4]}" || true; fi
+    throttle_remote_jobs "${i}"
     (
       HASH_SRC=$(local_seg_hash "$SOURCE" "$i") || exit 1
       if [ $REMOTE -eq 1 ]; then
@@ -246,10 +260,11 @@ function check_cloned_image {
 }
 
 # Normalize aliases while preserving literal option values.
-ddpar_normalize_args "$@"
+OPTSTRING=":b:s:d:j:B:r::R:h"
+ddpar_normalize_args "${OPTSTRING}" "$@"
 set -- "${DDPAR_ARGS[@]}"
 # Verwendung von getopts zur Verarbeitung der Optionen
-while getopts ":b:s:d:j:B:r::R:h" opt; do
+while getopts "${OPTSTRING}" opt; do
   case $opt in
     b)
       # Auflösung des Pfads erfolgt nach der Optionsschleife (remote-abhängig)
@@ -434,7 +449,10 @@ for partner in "${SOURCE:-}" "${DESTINATION:-}"; do
   if [ -n "${BASE_PATH}" ]; then
     if [ -b "${partner}" ]; then
       partner_size=$(blockdev --getsize64 "${partner}") || exit 1
-      [ "${partner_size}" -ge "${INPUT_SIZE}" ] || exit 1
+      if [ "${partner_size}" -lt "${INPUT_SIZE}" ]; then
+        echo "Error: FAILED block device ${partner} is smaller than the backup metadata size." >&2
+        exit 1
+      fi
     else
       partner_size=$(stat -Lc %s -- "${partner}") || exit 1
       if [ "${partner_size}" -ne "${INPUT_SIZE}" ]; then
@@ -480,7 +498,7 @@ if [ -n "$SOURCE" ] && [ -z "$BASE_PATH" ] && [ -n "$DESTINATION" ]; then
   if [[ "${INPUT_FILE_TYPE}" == "block special"* ]]; then
     INPUT_SIZE=$(blockdev --getsize64 "$SOURCE")
   else
-    INPUT_SIZE=$(stat -Lc %s "$SOURCE")
+    INPUT_SIZE=$(stat -Lc %s -- "$SOURCE")
   fi
   # Gleiche Aufteilung wie beim Clone-Vorgang (ddpar.sh size_calculation):
   # SPLIT_SIZE auf Blockgröße abgerundet, das letzte Segment prüft den Rest.

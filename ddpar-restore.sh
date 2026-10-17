@@ -1,15 +1,16 @@
 #!/bin/bash
 #
 # Restore segmented backups into a file or block device.
-# Version: 1.0.2 (2026-10-17)
+# Version: 1.0.3 (2026-10-17)
 # Flow: read and validate metadata and parts; prepare the target; restore all
 # segments; collect local and remote worker results.
 
 # Fehler in zcat-/dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
 # sonst zählt nur der letzte Befehl (z.B. ein erfolgreiches dd of=...).
 set -o pipefail
+# Resolve symlinked entry points (e.g. /usr/local/bin/ddpar) to the install dir.
 # shellcheck source=ddpar-common.sh
-source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ddpar-common.sh" || exit 1
+source "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/ddpar-common.sh" || exit 1
 
 # Set default input and output file names
 
@@ -51,10 +52,11 @@ function show_help {
 }
 
 # Normalize aliases while preserving literal option values.
-ddpar_normalize_args "$@"
+OPTSTRING=":i:o:r::R:yPh"
+ddpar_normalize_args "${OPTSTRING}" "$@"
 set -- "${DDPAR_ARGS[@]}"
 # Verwendung von getopts zur Verarbeitung der Optionen
-while getopts ":i:o:r::R:yPh" opt; do
+while getopts "${OPTSTRING}" opt; do
   case $opt in
     i) INPUT="$OPTARG";;
     o) OUTPUT="$OPTARG";;
@@ -109,13 +111,6 @@ if [ "$#" -ne 0 ]; then
   exit 2
 fi
 
-
-
-
-
-
-# Quote one path or command string for the remote login shell.
-
 function execute_remote_background_command {
   [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
   local command=$1
@@ -148,9 +143,6 @@ function ensure_remote_status_dir {
     return 1
   fi
 }
-
-# Gibt "rc <n>", "running" oder "missing" fuer einen Remote-Job aus. Der zweite
-# rc-Test faengt einen Job ab, der zwischen den ersten beiden Tests endet.
 
 # Stop only process groups recorded in this run's private status directory.
 # Earlier cleanup matched nc by its port to avoid killing unrelated shells;
@@ -595,7 +587,10 @@ if [ -e "${OUTPUT_FILE}" ]; then
   OUTPUT_FILE_TYPE=$(file -Lb -- "${OUTPUT_FILE}") || exit 1
   if [ -b "${OUTPUT_FILE}" ]; then
     OUTPUT_SIZE=$(blockdev --getsize64 "${OUTPUT_FILE}") || exit 1
-    [ "${OUTPUT_SIZE}" -ge "${INPUT_SIZE}" ] || exit 1
+    if [ "${OUTPUT_SIZE}" -lt "${INPUT_SIZE}" ]; then
+      echo "Error: target device ${OUTPUT_FILE} (${OUTPUT_SIZE} bytes) is smaller than the backup (${INPUT_SIZE} bytes)." >&2
+      exit 1
+    fi
   fi
 fi
 if [ "${REMOTE}" -ne 1 ]; then

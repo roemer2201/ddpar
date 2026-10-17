@@ -254,3 +254,22 @@ EOF
   [ "${status}" -ne 0 ]
   [ ! -e "${TMP}/target" ]
 }
+
+@test "Backup rejects a basename that would break the metadata format" {
+  printf 'source' > "${TMP}/source"
+  mkdir "${TMP}/backup"
+  vrun "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source" -o "${TMP}/backup" -m backup -n $'two\nlines'
+  [ "${status}" -ne 0 ]
+  [ -z "$(ls -A "${TMP}/backup")" ]
+}
+
+@test "Symlinked entry points find the helper and keep option values" {
+  mkdir "${TMP}/bin" "${TMP}/work"
+  ln -s "${REPO_ROOT}/ddpar-check.sh" "${TMP}/bin/ddpar-check"
+  printf 'same' > "${TMP}/work/--input"
+  printf 'same' > "${TMP}/work/--output"
+  # Without the .sh suffix the values after -s/-d must still stay literal.
+  vrun bash -c 'cd "$1" && "$2" -s --input -d --output -j 1' bash "${TMP}/work" "${TMP}/bin/ddpar-check"
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *'Segment 0: OK'* ]]
+}

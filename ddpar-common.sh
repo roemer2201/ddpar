@@ -2,12 +2,15 @@
 # Shared validation and SSH helpers for ddpar; source from the three commands.
 # Flow: validate decimal metadata; verify complete parts; isolate SSH sessions;
 # release private resources on every exit path.
-# Version: 1.0.1 (2026-10-17)
+# Version: 1.0.2 (2026-10-17)
 
 # Convert documented long aliases without changing data after -i/-o or --.
+# $1 is the caller's getopts string: only options with a required value
+# (X:, not X::) protect their next argument, independent of the script name.
 ddpar_normalize_args() {
+  local optstring="${1}" arg opt needs_value=0 literal=0
+  shift
   DDPAR_ARGS=()
-  local arg needs_value=0 literal=0
   for arg in "$@"; do
     if [ "${needs_value}" -eq 1 ] || [ "${literal}" -eq 1 ]; then
       DDPAR_ARGS+=("${arg}")
@@ -19,14 +22,12 @@ ddpar_normalize_args() {
       --help) DDPAR_ARGS+=(-h) ;;
       --input) DDPAR_ARGS+=(-i); needs_value=1 ;;
       --output) DDPAR_ARGS+=(-o); needs_value=1 ;;
-      -i|-o|-m|-j|-b|-B|-n|-s|-d|-R)
+      -?)
         DDPAR_ARGS+=("${arg}")
-        # -s/-d take values only in ddpar-check; keep each CLI's short syntax
-        # untouched and only suppress alias expansion for required values.
-        case "${arg}" in
-          -s|-d) [[ "${0}" == *ddpar-check.sh ]] && needs_value=1 ;;
-          *) needs_value=1 ;;
-        esac
+        opt="${arg#-}"
+        if [ "${opt}" != : ] && [[ "${optstring}" == *"${opt}:"* && "${optstring}" != *"${opt}::"* ]]; then
+          needs_value=1
+        fi
         ;;
       *) DDPAR_ARGS+=("${arg}") ;;
     esac
@@ -128,7 +129,7 @@ ddpar_verify_part() {
     actual=$(stat -Lc %s -- "${path}") || return 1
   fi
   if [ "${actual}" -ne "${expected}" ]; then
-    echo "Error: part ${path} has ${actual} bytes; expected ${expected} (statt der erwarteten ${expected})." >&2
+    echo "Fehler: Teil ${path} hat ${actual} Bytes statt der erwarteten ${expected} Bytes." >&2
     return 1
   fi
 }
@@ -261,13 +262,16 @@ close_ssh_connection() {
 ddpar_namespace_pid() {
   local proc_pid="${1}" key values
   local -a ids=()
+  # Without a readable status the /proc ID may belong to another namespace;
+  # never signal it untranslated, it could name an unrelated process here.
+  [ -r "/proc/${proc_pid}/status" ] || return 1
   while read -r key values; do
     if [ "${key}" = NSpid: ]; then
       read -r -a ids <<< "${values}"
       printf '%s\n' "${ids[DDPAR_PID_LEVEL]}"
       return 0
     fi
-  done < "/proc/${proc_pid}/status"
+  done 2>/dev/null < "/proc/${proc_pid}/status" || return 1
   printf '%s\n' "${proc_pid}"
 }
 

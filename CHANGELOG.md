@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] – Nachkorrekturen zum vollständigen Review
+
+- `ddpar.sh` prüfte den Backup-Basisnamen wegen eines überzähligen `--` nicht; Namen mit Zeilenumbruch werden jetzt abgelehnt.
+- Lange Aliase werden anhand des getopts-Strings des jeweiligen Skripts normalisiert statt anhand von `$0`; Werte nach `-s`/`-d` bleiben auch bei Aufruf ohne `.sh`-Endung unverändert.
+- Einstiegsskripte lösen Symlinks auf und finden `ddpar-common.sh` neben dem eigentlichen Skript.
+- `ddpar-check.sh -r` mit mehr als vier Jobs wartete zweimal auf dieselbe PID; ob ein zweites `wait` den Status einer bereits abgeholten PID noch liefert, ist nicht in jeder Bash-Version gesichert (sonst Exit 127 als Fehler). Der Exit-Status wird jetzt beim Drosseln gespeichert.
+- Abbruch: Ohne lesbare `/proc/<pid>/status` wird keine unübersetzte PID aus einem anderen PID-Namespace signalisiert.
+- Clone-Check übergibt die Quelle mit `--` an `stat`; zu kleine Blockgeräte werden mit Meldung statt stumm abgelehnt.
+- Mindestversion Bash 4.4 dokumentiert; verwaiste Kommentare und Tippfehler entfernt.
+
 ## [Unreleased] – Vollständiges Review vom 17.10.2026
 
 - Lokale Checks lesen tatsächliche Backup-Teile und prüfen Länge, gzip-CRC sowie Prüfsummen.

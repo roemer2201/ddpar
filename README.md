@@ -18,11 +18,14 @@ unterstützt: Ein nicht gleichmäßig verteilbarer Rest wird vom letzten Teil
 ## Voraussetzungen
 
 **Installation:** Alle vier `ddpar*.sh`-Dateien müssen im selben Verzeichnis liegen.
+Symlinks auf die Einstiegsskripte (z.B. `/usr/local/bin/ddpar -> /opt/ddpar/ddpar.sh`)
+werden aufgelöst; die Hilfsdatei wird neben dem eigentlichen Skript gesucht.
 
-- Linux mit `/proc`, Bash ab 4.3, GNU coreutils (`dd` mit `count_bytes`/`skip_bytes`/`seek_bytes`), `file`, `blockdev`
+- Linux mit `/proc`, Bash ab 4.4 (`wait` auf Prozesssubstitutionen), GNU coreutils (`dd` mit `count_bytes`/`skip_bytes`/`seek_bytes`), `file`, `blockdev`
 - `gzip` (bei Kompression), `sha256sum` (bei Checksummen)
 - Für Remote-Betrieb: `ssh`, `nc` (netcat-openbsd), `ss`; optional `sshpass` für Passwort-Login.
-  Auf dem Remote-Host zusätzlich Bash für die Fehlerweitergabe der Pipelines,
+  Auf dem Remote-Host zusätzlich Bash (ab 4.4, der Remote-Clone nutzt dort
+  denselben Segment-Schreiber) für die Fehlerweitergabe der Pipelines,
   `setsid` (util-linux), ein beschreibbares `/tmp` für die Statusdateien und
   `gzip` bei `-r c` (bei `-r n` **nicht** nötig)
 

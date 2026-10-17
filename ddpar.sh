@@ -1,15 +1,16 @@
 #!/bin/bash
 #
 # Clone or back up files and block devices in parallel segments.
-# Version: 1.0.2 (2026-10-17)
+# Version: 1.0.3 (2026-10-17)
 # Flow: validate options and endpoints; calculate segments; run local or remote
 # workers; collect every worker's result before reporting success.
 
 # Fehler in dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
 # sonst zählt nur der letzte Befehl (z.B. ein erfolgreiches dd of=...).
 set -o pipefail
+# Resolve symlinked entry points (e.g. /usr/local/bin/ddpar) to the install dir.
 # shellcheck source=ddpar-common.sh
-source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ddpar-common.sh" || exit 1
+source "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/ddpar-common.sh" || exit 1
 
 # Standardwerte für die Parameter
 INPUT_FILE=""
@@ -66,11 +67,12 @@ function show_help {
 
 function option_analysis {
   # Normalize aliases while preserving literal option values.
-  ddpar_normalize_args "$@"
+  local optstring=":i:o:m:j:b:n:r::R:csfhd"
+  ddpar_normalize_args "${optstring}" "$@"
   set -- "${DDPAR_ARGS[@]}"
   # Verwendung von getopts zur Verarbeitung der Optionen
   echo "Analysiere gegebene Optionen \"$*\""
-  while getopts ":i:o:m:j:b:n:r::R:csfhd" opt; do
+  while getopts "${optstring}" opt; do
     case $opt in
       i) INPUT="${OPTARG}";;
       o) OUTPUT="${OPTARG}";;
@@ -230,11 +232,6 @@ function set_colors {
 	fi
 }
 
-
-
-
-# Quote one argument for the remote login shell, without interpreting its data.
-
 # Run a command locally as an argv array or remotely with quoted arguments.
 function execute_command {
 	local command="" arg
@@ -283,9 +280,6 @@ function ensure_remote_status_dir {
 		return 1
 	fi
 }
-
-# Gibt "rc <n>", "running" oder "missing" fuer einen Remote-Job aus. Der zweite
-# rc-Test faengt einen Job ab, der zwischen den ersten beiden Tests endet.
 
 # Stop only process groups recorded in this run's private status directory.
 # Earlier cleanup matched nc by its port to avoid killing unrelated shells;
@@ -711,7 +705,7 @@ function backup_mode {
 	OUTPUT_FILE="${OUTPUT}/${OUTPUT_FILE_NAME}-"
 	METADATA_FILE="${OUTPUT_FILE}metadata.txt"
 
-	if ! ddpar_basename -- "${OUTPUT_FILE_NAME}" || ! ddpar_basename -- "${INPUT_FILE_NAME}"; then
+	if ! ddpar_basename "${OUTPUT_FILE_NAME}" || ! ddpar_basename "${INPUT_FILE_NAME}"; then
 		echo 'Error: backup basename must fit one metadata line.' >&2
 		return 1
 	fi
@@ -1014,7 +1008,7 @@ esac
 
 if [ $REMOTE -eq 1 ]; then
 	if close_ssh_connection; then
-		echo -e "${SUCCESSCOLOR}SSH-Verbindung zu ${REMOTE_HOST} erfolgreich gertrennt.${NOCOLOR}"
+		echo -e "${SUCCESSCOLOR}SSH-Verbindung zu ${REMOTE_HOST} erfolgreich getrennt.${NOCOLOR}"
 	fi
 fi
 

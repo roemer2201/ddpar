@@ -15,8 +15,6 @@
 
 load helpers
 
-
-
 @test "Remote Clone Datei (-r n) ist bitgenau" {
   require_remote_support
 
