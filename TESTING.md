@@ -517,3 +517,39 @@ Beim Backup wird pro Teil eine SHA256-Checksumme erstellt:
 ```bash
 ./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -f
 ```
+
+## 6. Bash-Completion
+
+Die automatisierten Fälle stehen in `tests/completion.bats`. Manuell in einer
+interaktiven Bash (erwartetes Ergebnis jeweils als Kommentar):
+
+```bash
+source /usr/share/bash-completion/bash_completion
+source completions/ddpar
+
+ddpar -m ba<Tab>                  # -> backup
+ddpar -r <Tab>                    # n, c und alle Optionen (kein l)
+ddpar -m backup -o <Tab>          # nur Verzeichnisse
+ddpar-restore -i /backup/<Tab>    # Basisnamen aus *-metadata.txt
+ddpar-check -b /backup/<Tab>      # dito
+ddpar -R root@<Tab>               # Hosts aus ~/.ssh/config und known_hosts
+ddpar -r -R host -o <Tab>         # keine Vorschläge, kein SSH-Aufruf
+```
+
+Dateinamen mit `:` oder `=` (z. B. `db-12:00.img`) müssen genau einmal
+eingefügt werden, nicht als `db-12:db-12:00.img`.
+
+## 7. Debian-Paket
+
+```bash
+make install-build-deps
+make deb                                  # führt lint und lokale Tests aus
+lintian --fail-on error ../ddpar_*_all.deb
+sudo apt install ../ddpar_*_all.deb
+python3 debian/tests/smoke                # installierte Programme testen
+man ddpar                                 # Handbuchseiten
+```
+
+Ohne Installation: `dpkg-deb -x ../ddpar_*_all.deb /tmp/pkg` und
+`python3 debian/tests/smoke --root /tmp/pkg`. Mit autopkgtest:
+`autopkgtest ../ddpar_*_all.deb -- null`.
