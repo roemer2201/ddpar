@@ -1,0 +1,209 @@
+# bash completion for ddpar and its companion tools. -*- shell-script -*-
+# Description: Complete each command's options, values, paths and backup bases.
+# Program flow:
+#   1. Identify the command and parse the options before the cursor.
+#   2. Select value completion from the command and local/remote context.
+#   3. Return candidates without executing ddpar or contacting remote hosts.
+# Usage: source completions/ddpar (after loading bash-completion >= 2.1).
+# Version: 1.0.1 (2026-10-17)
+
+# Offer directories and backup bases, not individual part/checksum files.
+# Metadata is only used as a filename marker; its contents are never executed.
+_ddpar_backup_bases()
+{
+    local candidate
+    local -a candidates
+    # Let bash-completion handle Readline quoting, escaped spaces and tildes.
+    # Direct compgen calls miss quoted backup paths in a real Tab invocation.
+    _filedir txt
+    candidates=("${COMPREPLY[@]}")
+    COMPREPLY=()
+    for candidate in "${candidates[@]}"; do
+        if [[ -d "${candidate}" ]]; then
+            COMPREPLY+=("${candidate}")
+        elif [[ "${candidate}" == *-metadata.txt && -f "${candidate}" ]]; then
+            COMPREPLY+=("${candidate%-metadata.txt}")
+        fi
+    done
+    return 0
+}
+
+# Readline replaces only the text after the last = or : in COMP_WORDBREAKS,
+# so strip that part of the whole word from each candidate. Otherwise a file
+# such as db-12:00.img would be inserted as db-12:db-12:00.img.
+_ddpar_trim()
+{
+    local word="${1}" breaks='' head='' i
+    [[ "${COMP_WORDBREAKS}" == *'='* ]] && breaks+='='
+    [[ "${COMP_WORDBREAKS}" == *':'* ]] && breaks+=':'
+    [[ -n "${breaks}" && "${word}" == *["${breaks}"]* ]] || return 0
+    head="${word%"${word##*["${breaks}"]}"}"
+    for i in "${!COMPREPLY[@]}"; do
+        COMPREPLY[i]="${COMPREPLY[i]#"${head}"}"
+    done
+}
+
+# Complete all executable tools; ddpar-common.sh and entrypoint.sh are helpers.
+_ddpar()
+{
+    local cur prev words cword
+    # Keep = and : inside the word so paths like a=b.img or db-12:00.img match.
+    _init_completion -n =: || return
+    local full_cur="${cur}"
+    local tool="${words[0]##*/}"
+    tool="${tool%.sh}"
+    local required flags options
+    case "${tool}" in
+        ddpar)
+            required=iomjbnR; flags=csfhd
+            options='-i --input -o --output -m -j -b -n -c -s -f -r -R -h --help -d'
+            ;;
+        ddpar-restore)
+            required=ioR; flags=yPh
+            options='-i --input -o --output -r -R -y -P -h --help'
+            ;;
+        ddpar-check)
+            required=bsdjBR; flags=h
+            options='-b -s -d -j -B -r -R -h --help'
+            ;;
+        run-remote-tests)
+            # The developer harness accepts flags only and is not packaged.
+            local arg
+            for arg in "${words[@]:1:cword-1}"; do
+                case "${arg}" in
+                    --no-build|--keep|--verbose|-h|--help) ;;
+                    *) return 0 ;;
+                esac
+            done
+            COMPREPLY=($(compgen -W '--no-build --keep --verbose -h --help' -- "${cur}"))
+            return 0
+            ;;
+        *) return 0 ;;
+    esac
+
+    # Follow getopts, including clusters and attached arguments. Required
+    # arguments are literal even when they look like options. Only -r may
+    # omit its value and be followed immediately by another option.
+    local pending='' mode=clone remote=0 backup=0 word rest opt value i
+    for ((i = 1; i < cword; i++)); do
+        word="${words[i]}"
+        if [[ -n "${pending}" ]]; then
+            if [[ "${pending}" != r || "${word}" != -* ]]; then
+                [[ "${pending}" == m ]] && mode="${word}"
+                pending=''
+                continue
+            fi
+            pending=''
+        fi
+        case "${word}" in
+            --) return 0 ;;
+            --input|--output)
+                [[ "${tool}" != ddpar-check ]] || return 0
+                pending="${word:2:1}"
+                continue
+                ;;
+            --help) continue ;;
+            --*|-) return 0 ;;
+            -*) rest="${word:1}" ;;
+            *) return 0 ;;
+        esac
+        while [[ -n "${rest}" ]]; do
+            opt="${rest:0:1}"; rest="${rest:1}"
+            if [[ "${opt}" == r || "${opt}" == R ]]; then
+                remote=1
+            fi
+            if [[ "${tool}" == ddpar-check && "${opt}" == b ]]; then
+                backup=1
+            fi
+            if [[ "${required}" == *"${opt}"* || "${opt}" == r ]]; then
+                if [[ -z "${rest}" ]]; then
+                    pending="${opt}"
+                elif [[ "${opt}" == m ]]; then
+                    mode="${rest}"
+                fi
+                break
+            fi
+            [[ "${flags}" == *"${opt}"* ]] || return 0
+        done
+    done
+
+    # A value may be attached to a short option, including after flag clusters.
+    # Reapply the prefix after generating candidates for the value alone.
+    local prefix='' option="${pending}"
+    if [[ "${option}" == r && "${cur}" == -* ]]; then
+        option=''
+    fi
+    if [[ -z "${option}" && "${cur}" == -?* && "${cur}" != --* ]]; then
+        rest="${cur:1}"
+        while [[ -n "${rest}" ]]; do
+            opt="${rest:0:1}"; rest="${rest:1}"
+            if [[ "${required}" == *"${opt}"* || "${opt}" == r ]]; then
+                option="${opt}"
+                prefix="${cur:0:${#cur}-${#rest}}"
+                cur="${rest}"
+                break
+            fi
+            [[ "${flags}" == *"${opt}"* ]] || return 0
+        done
+    fi
+
+    # Match value types to the actual parser, not similarly named options in
+    # other commands. Numeric candidates are suggestions, not allowed limits.
+    case "${option}" in
+        m) COMPREPLY=($(compgen -W 'clone backup' -- "${cur}")) ;;
+        r)
+            value='n c'
+            # With a separate optional value the user may also start an option.
+            [[ -z "${prefix}" ]] && value+=" ${options}"
+            COMPREPLY=($(compgen -W "${value}" -- "${cur}"))
+            ;;
+        R)
+            # Use local SSH aliases/known_hosts, retaining an optional user@.
+            local COMP_KNOWN_HOSTS_WITH_AVAHI=''
+            _known_hosts_real -a "${cur}"
+            ;;
+        j) COMPREPLY=($(compgen -W '1 2 4 8 16 32 64' -- "${cur}")) ;;
+        B) COMPREPLY=($(compgen -W '512 4096 65536 1048576 4194304' -- "${cur}")) ;;
+        b)
+            if [[ "${tool}" == ddpar-check ]]; then
+                [[ "${remote}" == 1 ]] || _ddpar_backup_bases
+            else
+                COMPREPLY=($(compgen -W '512 4096 65536 1048576 4194304' -- "${cur}"))
+            fi
+            ;;
+        i)
+            if [[ "${tool}" == ddpar-restore ]]; then
+                [[ "${remote}" == 1 ]] || _ddpar_backup_bases
+            else
+                _filedir
+            fi
+            ;;
+        o)
+            if [[ "${tool}" == ddpar && "${remote}" == 1 ]]; then
+                : # Remote paths must be entered manually; never open SSH on Tab.
+            elif [[ "${tool}" == ddpar && "${mode}" == backup ]]; then
+                _filedir -d
+            else
+                _filedir
+            fi
+            ;;
+        s) _filedir ;;
+        d) [[ "${remote}" == 1 && "${backup}" == 0 ]] || _filedir ;;
+        n) : ;; # Arbitrary backup basename, not a pathname or enum.
+        '') COMPREPLY=($(compgen -W "${options}" -- "${cur}")) ;;
+    esac
+
+    # Retain getopts' attached option/flag prefix, also for paths with spaces.
+    if [[ -n "${prefix}" ]]; then
+        for i in "${!COMPREPLY[@]}"; do
+            COMPREPLY[i]="${prefix}${COMPREPLY[i]}"
+        done
+    fi
+    _ddpar_trim "${full_cur}"
+    return 0
+}
+
+# Register repository filenames and installed command aliases. Other command
+# files in the completion directory can symlink here for lazy loading.
+complete -F _ddpar ddpar ddpar.sh ddpar-restore ddpar-restore.sh \
+    ddpar-check ddpar-check.sh run-remote-tests.sh

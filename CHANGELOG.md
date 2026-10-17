@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.1.0] – Bash-Completion und Debian-Paket
+
+### Bash-Completion
+
+- Kontextabhängige Completion für `ddpar`, `ddpar-restore`, `ddpar-check`, ihre
+  `.sh`-Namen und den Docker-Test-Runner: Optionen je Parser, Kurzoptions-Cluster,
+  angehängte Werte, SSH-Hosts, Dateien/Blockgeräte, Backup-Basisnamen und die
+  implementierten Modi. Tab startet weder eine Übertragung noch eine SSH-Verbindung.
+- Pfade mit `:` oder `=` (z. B. `db-12:00.img`) werden korrekt ergänzt; zuvor
+  verdoppelte Readline den Teil vor dem Trennzeichen (`db-12:db-12:00.img`).
+- Regressionstests (bats und echte Readline-Tab-Eingaben über ein PTY) sowie
+  ShellCheck-/CI-Abdeckung.
+
+### Debian-Paket
+
+- Natives Paket ohne root bauen (`make deb`, debhelper-Compat 13) mit
+  Laufzeitabhängigkeiten und Aufrufnamen mit und ohne `.sh`.
+- Gemeinsame Bibliothek privat unter `/usr/lib/ddpar`, automatisch ladbare
+  Completions, Handbuchseiten und Dokumentation.
+- Smoke-Test für das installierte Paket, als autopkgtest registriert
+  (`allow-stderr`, da `dd` seine Statistik auf stderr ausgibt), und CI-Job, der
+  das Paket baut, mit Lintian prüft und das `.deb` als Artefakt bereitstellt.
+
 ## [Unreleased] – Nachkorrekturen zum vollständigen Review
 
 - `ddpar.sh` prüfte den Backup-Basisnamen wegen eines überzähligen `--` nicht; Namen mit Zeilenumbruch werden jetzt abgelehnt.

@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+# Package architecture-independent Bash tools without requiring root.
+
+%:
+	dh $@
+
+# These scripts have no compilation step or upstream install target.
+override_dh_auto_build:
+override_dh_auto_install:
+
+# Package builds run deterministic local tests; hardware/SSH tests stay in CI.
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	$(MAKE) lint
+	bats tests/cli.bats tests/completion.bats tests/integrity.bats tests/roundtrip.bats
+endif

@@ -29,6 +29,79 @@ werden aufgelöst; die Hilfsdatei wird neben dem eigentlichen Skript gesucht.
   `setsid` (util-linux), ein beschreibbares `/tmp` für die Statusdateien und
   `gzip` bei `-r c` (bei `-r n` **nicht** nötig)
 
+## Debian-Paket (Debian/Ubuntu)
+
+Das Paket laesst sich ohne root-Rechte bauen; nur das Installieren der
+Bauabhaengigkeiten und des fertigen Pakets benoetigt administrative Rechte:
+
+```bash
+make install-build-deps
+make deb
+sudo apt install ../ddpar_1.1.0_all.deb
+```
+
+`make deb` verwendet `dpkg-buildpackage -us -uc -b` und schreibt `.deb`,
+`.buildinfo` und `.changes` ins uebergeordnete Verzeichnis. Beim Bau werden
+ShellCheck und die lokalen CLI-, Completion-, Integritaets- und Roundtrip-Tests
+ausgefuehrt. Die Paketversion steht in `debian/changelog`. Die Paketierung ist
+als natives Quellpaket (`3.0 (native)`) angelegt; fuer einen Quell- und Binaerbau
+genuegt `dpkg-buildpackage -us -uc` ohne separates Upstream-Tararchiv.
+
+Das architekturunabhaengige Paket installiert:
+
+| Inhalt | Pfad |
+|---|---|
+| Befehle | `/usr/bin/ddpar`, `/usr/bin/ddpar-restore`, `/usr/bin/ddpar-check` |
+| Kompatible Aufrufnamen | dieselben drei Befehle mit `.sh` |
+| Skripte und gemeinsame Bibliothek | `/usr/lib/ddpar/` |
+| Bash-Completion und Lade-Aliase | `/usr/share/bash-completion/completions/` |
+| Handbuchseiten | `man ddpar`, `man ddpar-restore`, `man ddpar-check` |
+| Dokumentation | `/usr/share/doc/ddpar/` |
+
+Die oben beschriebenen Anforderungen fuer lokalen und Remote-Betrieb sind
+als Paketabhaengigkeiten hinterlegt. `bash-completion` wird empfohlen und
+bei einer normalen apt-Installation mitinstalliert; `sshpass` bleibt optional.
+Die Completion wird in einer interaktiven Bash mit aktiviertem
+`bash-completion` automatisch geladen. Das Docker-Testwerkzeug gehoert zum
+Checkout und wird nicht ins Laufzeitpaket installiert.
+
+Die CI baut das Paket, prueft es mit Lintian und testet die extrahierten
+Aufrufnamen samt Completion-Laden und Datei-Roundtrip. Das `.deb` ist danach
+als Workflow-Artefakt `ddpar-debian` verfuegbar. `debian/tests/smoke` ist auch
+als autopkgtest fuer eine installierte Paketversion registriert.
+
+## Bash-Completion
+
+Mit installiertem `bash-completion` (ab 2.1) kann die Completion im Checkout
+direkt geladen werden:
+
+```bash
+source /usr/share/bash-completion/bash_completion
+source completions/ddpar
+```
+
+Fuer dauerhaftes Laden ohne root-Rechte alle Dateien und Symlinks aus
+`completions/` nach `${BASH_COMPLETION_USER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion}/completions/`
+kopieren. Diese Verzeichnisse bei Bedarf zuerst anlegen. Bash-Completion muss
+in der interaktiven Shell aktiviert sein; danach wird beim ersten Tab geladen.
+
+Unterstuetzt werden `ddpar`, `ddpar-restore`, `ddpar-check`, ihre `.sh`-Namen
+und das Entwicklerwerkzeug `testing-docker/run-remote-tests.sh`. Die eingelesene
+Bibliothek `ddpar-common.sh` und der Container-Entrypoint haben keine Benutzer-CLI.
+Die Completion bietet alle vom jeweiligen Parser unterstuetzten Optionen,
+`clone`/`backup`, die implementierten Remote-Modi `n`/`c`, Zahlenvorschlaege,
+lokale Dateien/Blockgeraete und SSH-Hosts (auch `user@host`) an. Zahlenvorschlaege
+begrenzen die zulaessigen Werte nicht. Kurzoptionen mit angehaengten Werten und
+Flag-Kombinationen werden ebenfalls erkannt.
+
+Restore-Eingaben (`-i`/`--input`) und Check-Backups (`-b`) vervollstaendigen
+den Basisnamen aus `*-metadata.txt`, einschliesslich Verzeichnissen zum
+Navigieren. Im Backup-Modus bietet `ddpar -o` Verzeichnisse an; `-n` erwartet
+einen frei gewaehlten Namen. Remote-Pfade muessen von Hand eingegeben werden;
+Tab startet weder SSH-Verbindungen noch eines der ddpar-Programme. Dafuer
+`-r`/`-R` vor dem jeweiligen Remote-Pfad angeben. Nach `--` werden keine
+Argumente vorgeschlagen, da die Programme keine Positionsargumente akzeptieren.
+
 ## Schnellstart
 
 ```bash

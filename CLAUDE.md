@@ -15,6 +15,9 @@ die gleichzeitig über separate `dd`-Prozesse verarbeitet werden.
 | `ddpar-restore.sh` | Wiederherstellen eines mit `ddpar.sh -m backup` erstellten Backups |
 | `ddpar-check.sh` | Prüfung der Integrität via SHA256 (Quelle↔Backup oder Backup↔Ziel) |
 | `ddpar-common.sh` | Gemeinsame Metadaten-, Datenstrom- und SSH-Helfer; neben den Einstiegsskripten ausliefern |
+| `completions/ddpar` | Bash-Completion für alle Programme; die übrigen Dateien in `completions/` sind Symlinks für Lazy Loading |
+| `debian/` | Natives Debian-Paket (Handbuchseiten unter `debian/manpages/`, Smoke-Test/autopkgtest unter `debian/tests/`) |
+| `tests/` | bats-Tests (`make test`); `completion_readline.py` prüft echte Tab-Eingaben |
 | `TESTING.md` | Manuelle Testszenarien mit Beispielkommandos |
 | `ARCHITECTURE.md` | Design-Dokumentation: Parallelisierung, Pipes, Remote-Konzept |
 | `CHANGELOG.md` | Versionshistorie und Bug-Fix-Dokumentation |
@@ -50,8 +53,13 @@ COMPRESSION_LEVEL=6    # nur vorhanden wenn komprimiert
 ## Änderungen validieren
 
 ```bash
-make lint        # ShellCheck auf alle .sh-Dateien
+make lint        # ShellCheck auf alle .sh-Dateien und completions/ddpar
+make test        # bats-Tests (Blockgeräte/SSH werden ohne root/SSH übersprungen)
+make deb         # Debian-Paket bauen (führt lint und lokale Tests aus)
 ```
+
+Neue Optionen in den Programmen auch in `completions/ddpar`, den
+Handbuchseiten unter `debian/manpages/` und `tests/completion.bats` nachziehen.
 
 Manuelle Tests: siehe `TESTING.md`.
 

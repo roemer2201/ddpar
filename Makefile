@@ -1,6 +1,6 @@
-SCRIPTS := ddpar.sh ddpar-restore.sh ddpar-check.sh ddpar-common.sh testing-docker/*.sh
+SCRIPTS := ddpar.sh ddpar-restore.sh ddpar-check.sh ddpar-common.sh testing-docker/*.sh completions/ddpar
 
-.PHONY: lint lint-gate test test-verbose test-log test-integration check install-deps help
+.PHONY: lint lint-gate test test-verbose test-log test-integration check install-deps install-build-deps deb help
 
 help:
 	@echo "Verfügbare Targets:"
@@ -13,6 +13,8 @@ help:
 	@echo "  make test-integration  Nur Blockgerät- (losetup) und Remote-Tests (SSH/netcat)"
 	@echo "  make check             lint + test (vollständiger Lint-Report und Tests)"
 	@echo "  make install-deps      ShellCheck, bats und netcat installieren (Debian/Ubuntu)"
+	@echo "  make install-build-deps  Debian-Paketbau-Abhaengigkeiten installieren"
+	@echo "  make deb               Debian-Paket im uebergeordneten Verzeichnis bauen"
 
 lint:
 	@command -v shellcheck > /dev/null 2>&1 || \
@@ -52,4 +54,11 @@ test-integration:
 check: lint test
 
 install-deps:
-	sudo apt-get install -y shellcheck bats netcat-openbsd
+	sudo apt-get install -y shellcheck bats bash-completion python3 netcat-openbsd
+
+# Build as the calling user; debian/rules declares Rules-Requires-Root: no.
+deb:
+	dpkg-buildpackage -us -uc -b
+
+install-build-deps:
+	sudo apt-get install -y build-essential debhelper dpkg-dev make bats bash-completion python3 shellcheck file mawk

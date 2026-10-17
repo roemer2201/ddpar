@@ -11,7 +11,7 @@ Remote- (SSH/netcat) und Blockgerät-Szenarien.
 ## Voraussetzungen
 
 ```sh
-make install-deps        # shellcheck, bats, netcat-openbsd (Debian/Ubuntu)
+make install-deps        # shellcheck, bats, bash-completion, python3, netcat-openbsd
 ```
 
 ## Ausführen
@@ -31,6 +31,11 @@ sodass `make test` auch ohne root/SSH grün bleibt.
 
 - `cli.bats` – Verhalten der Kommandozeile: Hilfe (`-h`), `-y`-Flag,
   fehlende/ungültige Parameter.
+- `completion.bats` und `completion_readline.py` - Optionen je Tool,
+  Optionskombinationen, lokale/entfernte Pfade, Backup-Basisnamen und SSH-Hosts.
+  Ein Test startet Bash in einem Pseudoterminal und prueft echte Tab-Eingaben
+  mit Leerzeichen, Quotes und angehaengten Optionswerten. Python 3 verwendet
+  dafuer ausschliesslich seine Standardbibliothek.
 - `roundtrip.bats` – End-to-End auf Datei-Basis (kein sudo nötig):
   `backup` → `check` → `restore`, Vergleich Original vs. Wiederhergestellt,
   jeweils komprimiert und unkomprimiert, plus eine Negativ-Probe (manipuliertes
@@ -77,5 +82,15 @@ root aus (siehe `.github/workflows/ci.yml`).
 
 Remote-Regressionen prüfen außerdem gzip-CRC-Fehler trotz identischer Rohdaten,
 12 parallele Segmente beim Check und gleichzeitige unabhängige Aufrufe.
-Alle drei CI-Jobs müssen erfolgreich sein; übersprungene Integrationstests im
+Alle vier CI-Jobs müssen erfolgreich sein; übersprungene Integrationstests im
 lokalen Lauf ersetzen keinen erfolgreichen SSH-/Blockgeräte-Job.
+
+### Paketinstallation
+
+Der zusaetzliche `debian`-CI-Job baut das `.deb`, prueft es mit Lintian und
+fuehrt `debian/tests/smoke` gegen das extrahierte Paket aus. Der Test prueft
+alle sechs Aufrufnamen, automatisches Completion-Laden sowie komprimiertes
+Backup, Restore, Clone und Checks. Er kann auch ohne `--root` gegen ein
+installiertes Paket laufen und ist in `debian/tests/control` als autopkgtest
+registriert. Der Paketbau selbst fuehrt nur lokale Tests aus; zufaellig
+vorhandene Loop-Geraete oder SSH-Zugaenge aktivieren keine Integrationstests.

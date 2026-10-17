@@ -1,0 +1,4 @@
+Tests: smoke
+Depends: @, bash-completion, python3
+# dd reports its transfer statistics on stderr; failures still exit nonzero.
+Restrictions: allow-stderr

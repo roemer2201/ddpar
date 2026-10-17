@@ -5,6 +5,36 @@ on:
   pull_request:
 
 jobs:
+  debian:
+    name: Debian package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential debhelper dpkg-dev bats bash-completion python3 shellcheck file mawk lintian
+
+      - name: Build package and run local regression tests
+        run: make deb
+
+      - name: Check package metadata and contents
+        run: lintian --fail-on error ../ddpar_*_all.deb
+
+      - name: Test extracted package entry points and completion
+        run: |
+          dpkg-deb -x ../ddpar_*_all.deb "${RUNNER_TEMP}/ddpar-package"
+          python3 debian/tests/smoke --root "${RUNNER_TEMP}/ddpar-package"
+          mkdir -p dist
+          cp ../ddpar_*_all.deb dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ddpar-debian
+          path: dist/*.deb
+          if-no-files-found: error
+
   lint:
     name: ShellCheck
     runs-on: ubuntu-latest
@@ -25,7 +55,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y bats netcat-openbsd
+        run: sudo apt-get update && sudo apt-get install -y bats bash-completion python3 netcat-openbsd
 
       # Blockgerät- und Remote-Tests überspringen sich hier mangels root/SSH
       # automatisch; sie laufen im dedizierten integration-Job.

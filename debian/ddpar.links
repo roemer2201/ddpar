@@ -1,0 +1,14 @@
+usr/lib/ddpar/ddpar.sh usr/bin/ddpar
+usr/lib/ddpar/ddpar.sh usr/bin/ddpar.sh
+usr/lib/ddpar/ddpar-restore.sh usr/bin/ddpar-restore
+usr/lib/ddpar/ddpar-restore.sh usr/bin/ddpar-restore.sh
+usr/lib/ddpar/ddpar-check.sh usr/bin/ddpar-check
+usr/lib/ddpar/ddpar-check.sh usr/bin/ddpar-check.sh
+usr/share/bash-completion/completions/ddpar usr/share/bash-completion/completions/ddpar.sh
+usr/share/bash-completion/completions/ddpar usr/share/bash-completion/completions/ddpar-restore
+usr/share/bash-completion/completions/ddpar usr/share/bash-completion/completions/ddpar-restore.sh
+usr/share/bash-completion/completions/ddpar usr/share/bash-completion/completions/ddpar-check
+usr/share/bash-completion/completions/ddpar usr/share/bash-completion/completions/ddpar-check.sh
+usr/share/man/man1/ddpar.1 usr/share/man/man1/ddpar.sh.1
+usr/share/man/man1/ddpar-restore.1 usr/share/man/man1/ddpar-restore.sh.1
+usr/share/man/man1/ddpar-check.1 usr/share/man/man1/ddpar-check.sh.1

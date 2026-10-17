@@ -1,0 +1,5 @@
+ddpar.sh usr/lib/ddpar
+ddpar-restore.sh usr/lib/ddpar
+ddpar-check.sh usr/lib/ddpar
+ddpar-common.sh usr/lib/ddpar
+completions/ddpar usr/share/bash-completion/completions

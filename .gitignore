@@ -1,0 +1,11 @@
+.claude/
+__pycache__/
+*.pyc
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/ddpar/
+/debian/files
+/debian/*.substvars
+*.deb
+*.buildinfo
+*.changes
