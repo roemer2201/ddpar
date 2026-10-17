@@ -1,0 +1,59 @@
+.TH DDPAR-CHECK 1 "2026-10-17" "ddpar 1.1.0" "User Commands"
+.SH NAME
+ddpar-check \- verify a ddpar backup or clone using SHA256
+.SH SYNOPSIS
+.B ddpar-check
+.RI [ options ]
+.SH DESCRIPTION
+Compare exactly two of source (\-s), backup (\-b) and destination (\-d).
+Local backup checks require SHA256 files created by ddpar \-s.
+A clone check without \-b compares source and destination directly.
+The command is also available as ddpar-check.sh.
+.SH OPTIONS
+.TP
+.BI \-b " base"
+Backup basename including its path, without the \-metadata.txt or part suffix.
+With remote operation, the backup belongs to the remote host.
+.TP
+.BI \-s " path"
+Local source file or block device.
+.TP
+.BI \-d " path"
+Destination file or block device. With a remote clone check (no \-b),
+this path belongs to the remote host; otherwise it is local.
+.TP
+.BI \-j " number"
+Worker count for clone checks (default: 4). Backup checks use metadata.
+.TP
+.BI \-B " bytes"
+Block size for clone checks (default: 1048576). Backup checks use metadata.
+.TP
+.BR \-r " [n|c]"
+Enable remote checking (default: n). Mode n fetches compressed backup parts
+via SSH and decompresses locally; mode c decompresses and hashes remotely.
+Mode l is rejected.
+.TP
+.BI \-R " [user@]host"
+SSH host or SSH configuration alias. Also enables remote operation.
+.TP
+.BR \-h ", " \-\-help
+Show built-in help. Unlike ddpar and ddpar-restore, this command has no
+\-\-input or \-\-output aliases.
+.SH EXAMPLES
+.nf
+ddpar-check \-s /dev/sdb \-b /mnt/backups/sdb
+ddpar-check \-b /mnt/backups/sdb \-d restored.img
+ddpar-check \-s source.img \-d clone.img \-j 8
+ddpar-check \-s source.img \-d /remote/clone.img \-r \-R user@host
+.fi
+.SH NOTES
+Checks do not write to source, backup or destination. They detect corrupt or
+missing parts, invalid lengths and mismatching hashes.
+Use the clone's worker count and block size for clone checks.
+Remote checks use SSH rather than netcat for the data and hashes.
+.SH EXIT STATUS
+Zero indicates a matching comparison; nonzero indicates an error or mismatch.
+.SH SEE ALSO
+.BR sha256sum (1),
+.BR ddpar (1),
+.BR ddpar-restore (1)

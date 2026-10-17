@@ -1,0 +1,59 @@
+.TH DDPAR-RESTORE 1 "2026-10-17" "ddpar 1.1.0" "User Commands"
+.SH NAME
+ddpar-restore \- restore a segmented ddpar backup
+.SH SYNOPSIS
+.B ddpar-restore
+.BI \-i " backup-base"
+.BI \-o " destination"
+.RI [ options ]
+.SH DESCRIPTION
+Validate backup metadata and parts before restoring to a local file or block
+device. Worker count and block size come from the backup metadata.
+The command is also available as ddpar-restore.sh.
+.SH OPTIONS
+.TP
+.BI \-i " base" ", \-\-input " base
+Backup basename including its path, without the \-metadata.txt or part suffix.
+The backup is remote when \-r or \-R is used.
+.TP
+.BI \-o " path" ", \-\-output " path
+Local output file, block device or directory. A directory destination uses
+the filename recorded in the metadata.
+.TP
+.BR \-r " [n|c]"
+Enable remote restore (default: n). For compressed backups, mode n decompresses
+locally, while mode c decompresses on the remote host. Mode l is rejected.
+.TP
+.BI \-R " [user@]host"
+SSH host or SSH configuration alias containing the backup. Also enables remote
+operation.
+.TP
+.B \-y
+Skip the confirmation prompt.
+.TP
+.B \-P
+Skip fallocate preallocation for a regular-file destination.
+.TP
+.BR \-h ", " \-\-help
+Show built-in help.
+.SH ENVIRONMENT
+.TP
+.B DDPAR_NETWORK_TIMEOUT
+Netcat inactivity timeout in seconds (default: 300).
+.SH EXAMPLES
+.nf
+ddpar-restore \-i /mnt/backups/sdb \-o /dev/sdc
+ddpar-restore \-i /backup/disk \-o restored.img \-r c \-R user@host \-y
+.fi
+.SH NOTES
+Restoration overwrites the destination. Regular files are truncated to the
+saved size; block devices keep data beyond the saved image.
+Incomplete backups and invalid part lengths are rejected. Compressed parts
+are checked including gzip CRC; local SHA256 files are checked when available.
+Remote payloads use unencrypted netcat; only the SSH control channel is
+encrypted. Use remote transfers on trusted networks.
+.SH EXIT STATUS
+Zero indicates success; nonzero indicates an error or a refused operation.
+.SH SEE ALSO
+.BR ddpar (1),
+.BR ddpar-check (1)

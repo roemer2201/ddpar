@@ -1,0 +1,7 @@
+ddpar (1.1.0) unstable; urgency=medium
+
+  * Add context-sensitive Bash completion for all user-facing tools.
+  * Introduce native Debian packaging with installed-command smoke tests,
+    manual pages and automatic completion loading.
+
+ -- roemer2201 <roemer2201@users.noreply.github.com>  Sat, 17 Oct 2026 17:00:00 +0200

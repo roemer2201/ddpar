@@ -1,0 +1,3 @@
+# This file is a sourced library, not an entry point; keep it non-executable.
+# Its Bash shebang also identifies the language for editors and ShellCheck.
+ddpar: script-not-executable [usr/lib/ddpar/ddpar-common.sh]

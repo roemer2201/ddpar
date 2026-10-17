@@ -1,0 +1,89 @@
+.TH DDPAR 1 "2026-10-17" "ddpar 1.1.0" "User Commands"
+.SH NAME
+ddpar \- clone or back up files and block devices in parallel
+.SH SYNOPSIS
+.B ddpar
+.BI \-i " input"
+.BI \-o " output"
+.RI [ options ]
+.SH DESCRIPTION
+Split an input file or block device into segments and process them with
+parallel GNU dd workers. The last segment includes any remaining bytes.
+The commands are also available with a .sh suffix.
+.SH OPTIONS
+.TP
+.BI \-i " path" ", \-\-input " path
+Source file or block device. Always local.
+.TP
+.BI \-o " path" ", \-\-output " path
+Clone destination (file, directory or block device), or backup directory.
+With remote operation, this path belongs to the remote host.
+.TP
+.BI \-m " clone|backup"
+Operation mode (default: clone).
+.TP
+.BI \-j " number"
+Number of parallel workers, a positive decimal integer (default: 4).
+.TP
+.BI \-b " bytes"
+Block size, a positive decimal integer (default: 1048576).
+.TP
+.BI \-n " name"
+Backup basename, without a directory component. Backup mode only.
+The default is the input basename.
+.TP
+.B \-c
+Request gzip compression at level 6.
+Local compression is supported for backups. Clone compression requires
+remote mode c; otherwise the clone proceeds uncompressed with a warning.
+.TP
+.B \-s
+Create SHA256 files for local backup parts. Not applied to remote backups.
+.TP
+.B \-f
+Force an operation despite overwrite protection. Use with care.
+.TP
+.BR \-r " [n|c]"
+Enable remote operation. Mode n is the default and compresses locally;
+mode c uses gzip on the remote side. Mode l is unsupported and rejected.
+.TP
+.BI \-R " [user@]host"
+SSH host or SSH configuration alias. Also enables remote operation.
+.TP
+.B \-d
+Enable shell tracing. Debug output can expose passwords.
+.TP
+.BR \-h ", " \-\-help
+Show built-in help.
+.SH ENVIRONMENT
+.TP
+.B COMPRESSION
+Set to 1 to request compression, or 0 to disable it (default: 0).
+.TP
+.B COMPRESSION_LEVEL
+Gzip level from 1 through 9 when enabled through COMPRESSION (default: 6).
+The command-line flag \-c resets this level to 6.
+.TP
+.B CHECKSUM
+Set to 1 to request local backup checksums, or 0 to disable them (default: 0).
+The command-line flags \-c and \-s enable their respective features.
+.TP
+.B DDPAR_NETWORK_TIMEOUT
+Netcat inactivity timeout in seconds (default: 300).
+.SH EXAMPLES
+.nf
+ddpar \-i /dev/sdb \-o /mnt/backups \-m backup \-c \-s
+ddpar \-i source.img \-o clone.img \-j 8
+ddpar \-i /dev/sdb \-o /backup \-m backup \-r n \-R user@host
+.fi
+.SH NOTES
+Do not modify the source during a transfer. Files and block devices may
+be overwritten. Remote payloads use unencrypted netcat; only the SSH
+control channel is encrypted. Use remote transfers on trusted networks.
+The remote host needs the commands described in the installed README.
+.SH EXIT STATUS
+Zero indicates success; nonzero indicates an error or a refused operation.
+.SH SEE ALSO
+.BR dd (1),
+.BR ddpar-restore (1),
+.BR ddpar-check (1)

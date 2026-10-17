@@ -1,0 +1,37 @@
+Source: ddpar
+Section: utils
+Priority: optional
+Maintainer: roemer2201 <roemer2201@users.noreply.github.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ bash-completion (>= 2.1),
+ bats,
+ file,
+ mawk | gawk,
+ python3,
+ shellcheck,
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/roemer2201/ddpar
+Vcs-Git: https://github.com/roemer2201/ddpar.git
+Vcs-Browser: https://github.com/roemer2201/ddpar
+
+Package: ddpar
+Architecture: all
+Depends:
+ ${misc:Depends},
+ bash (>= 4.4),
+ file,
+ iproute2,
+ mawk | gawk,
+ netcat-openbsd,
+ openssh-client,
+Recommends: bash-completion (>= 2.1)
+Suggests: sshpass
+Description: parallel cloning, backup and restoration of files and block devices
+ ddpar splits files or block devices into segments processed by parallel dd
+ workers. It supports local and SSH-controlled remote transfers, gzip backups,
+ SHA256 integrity checks and restoration from validated backup metadata.
+ .
+ This package includes ddpar, ddpar-restore and ddpar-check, their .sh aliases,
+ manual pages and context-sensitive Bash completion.

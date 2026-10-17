@@ -29,6 +29,47 @@ werden aufgelöst; die Hilfsdatei wird neben dem eigentlichen Skript gesucht.
   `setsid` (util-linux), ein beschreibbares `/tmp` für die Statusdateien und
   `gzip` bei `-r c` (bei `-r n` **nicht** nötig)
 
+## Debian-Paket (Debian/Ubuntu)
+
+Das Paket laesst sich ohne root-Rechte bauen; nur das Installieren der
+Bauabhaengigkeiten und des fertigen Pakets benoetigt administrative Rechte:
+
+```bash
+make install-build-deps
+make deb
+sudo apt install ../ddpar_1.1.0_all.deb
+```
+
+`make deb` verwendet `dpkg-buildpackage -us -uc -b` und schreibt `.deb`,
+`.buildinfo` und `.changes` ins uebergeordnete Verzeichnis. Beim Bau werden
+ShellCheck und die lokalen CLI-, Completion-, Integritaets- und Roundtrip-Tests
+ausgefuehrt. Die Paketversion steht in `debian/changelog`. Die Paketierung ist
+als natives Quellpaket (`3.0 (native)`) angelegt; fuer einen Quell- und Binaerbau
+genuegt `dpkg-buildpackage -us -uc` ohne separates Upstream-Tararchiv.
+
+Das architekturunabhaengige Paket installiert:
+
+| Inhalt | Pfad |
+|---|---|
+| Befehle | `/usr/bin/ddpar`, `/usr/bin/ddpar-restore`, `/usr/bin/ddpar-check` |
+| Kompatible Aufrufnamen | dieselben drei Befehle mit `.sh` |
+| Skripte und gemeinsame Bibliothek | `/usr/lib/ddpar/` |
+| Bash-Completion und Lade-Aliase | `/usr/share/bash-completion/completions/` |
+| Handbuchseiten | `man ddpar`, `man ddpar-restore`, `man ddpar-check` |
+| Dokumentation | `/usr/share/doc/ddpar/` |
+
+Die oben beschriebenen Anforderungen fuer lokalen und Remote-Betrieb sind
+als Paketabhaengigkeiten hinterlegt. `bash-completion` wird empfohlen und
+bei einer normalen apt-Installation mitinstalliert; `sshpass` bleibt optional.
+Die Completion wird in einer interaktiven Bash mit aktiviertem
+`bash-completion` automatisch geladen. Das Docker-Testwerkzeug gehoert zum
+Checkout und wird nicht ins Laufzeitpaket installiert.
+
+Die CI baut das Paket, prueft es mit Lintian und testet die extrahierten
+Aufrufnamen samt Completion-Laden und Datei-Roundtrip. Das `.deb` ist danach
+als Workflow-Artefakt `ddpar-debian` verfuegbar. `debian/tests/smoke` ist auch
+als autopkgtest fuer eine installierte Paketversion registriert.
+
 ## Bash-Completion
 
 Mit installiertem `bash-completion` (ab 2.1) kann die Completion im Checkout

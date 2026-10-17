@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.0] - Debian packaging
+
+- Add rootless Debian package builds (`make deb`, debhelper compat 13), runtime
+  dependencies and installed entry points with and without the .sh suffix.
+- Ship the shared library privately alongside the commands, install Bash
+  completion with lazy-loading aliases, and provide manual pages and docs.
+- Add an installed-package smoke test, autopkgtest metadata and a CI build
+  that checks the package and publishes its .deb as a workflow artifact.
+
 ## [Unreleased] - Bash completion
 
 - Context-sensitive Bash completion for all three commands and the Docker test

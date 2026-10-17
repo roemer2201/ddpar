@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Verify installed entry points, lazy completion and an end-to-end round trip."""
+
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--root", type=Path, default=Path("/"),
+                    help="extracted package root (default: installed filesystem)")
+args = parser.parse_args()
+root = args.root.resolve()
+bindir = root / "usr/bin"
+env = dict(os.environ)
+env["BASH_COMPLETION_USER_DIR"] = str(root / "usr/share/bash-completion")
+
+
+def run(*command):
+    """Keep native diagnostics when an installed command fails."""
+    print("Running:", *map(str, command), flush=True)
+    subprocess.run(list(map(str, command)), check=True, env=env)
+
+
+for tool in ("ddpar", "ddpar-restore", "ddpar-check"):
+    for suffix in ("", ".sh"):
+        name = tool + suffix
+        executable = bindir / name
+        assert executable.is_file(), f"Missing or broken entry point: {executable}"
+        run(executable, "--help")
+        run("bash", "--noprofile", "--norc", "-c",
+            'source /usr/share/bash-completion/bash_completion; '
+            '_completion_loader "$1"; complete -p "$1"', "bash", name)
+
+assert not (bindir / "ddpar-common.sh").exists(), "Library must remain private"
+assert (root / "usr/lib/ddpar/ddpar-common.sh").is_file()
+with tempfile.TemporaryDirectory(prefix="ddpar-installed-") as directory:
+    work = Path(directory)
+    source = work / "source image"
+    source.write_bytes(bytes(range(256)) * 8192 + b"end")
+    backup = work / "backup dir"
+    backup.mkdir()
+    base = backup / "fixture"
+    restored = work / "restored image"
+    clone = work / "clone image"
+    run(bindir / "ddpar", "-i", source, "-o", backup, "-m", "backup",
+        "-n", "fixture", "-j", "3", "-b", "4096", "-s", "-c")
+    run(bindir / "ddpar-check.sh", "-b", base, "-s", source)
+    run(bindir / "ddpar-restore", "-i", base, "-o", restored, "-y", "-P")
+    assert restored.read_bytes() == source.read_bytes()
+    run(bindir / "ddpar.sh", "-i", source, "-o", clone, "-j", "3", "-b", "4096")
+    run(bindir / "ddpar-check", "-s", source, "-d", clone, "-j", "3", "-B", "4096")
+    assert clone.read_bytes() == source.read_bytes()
+print("Installed commands, completion loading and round trips passed.")
