@@ -21,6 +21,7 @@ REMOTE=0
 # Remote-Modus: "n" = netcat, Dekompression auf DIESER Maschine,
 # "c" = netcat, Dekompression auf der Remote-Maschine
 REMOTE_MODE="n"
+REMOTE_PORT=""
 REMOTE_HOST=""
 
 DEBUG=0
@@ -52,7 +53,7 @@ function show_help {
 }
 
 # Normalize aliases while preserving literal option values.
-OPTSTRING=":i:o:r::R:yPh"
+OPTSTRING=":i:o:r:R:yPh"
 ddpar_normalize_args "${OPTSTRING}" "$@"
 set -- "${DDPAR_ARGS[@]}"
 # Verwendung von getopts zur Verarbeitung der Optionen
@@ -73,12 +74,6 @@ while getopts "${OPTSTRING}" opt; do
           echo "Error: encrypted mode l is not implemented; refusing plaintext transfer." >&2
           exit 2
           ;;
-        -*)
-          # "-r" ohne Modus: getopts hat bereits die nächste Option als Argument
-          # gelesen. OPTIND zurücksetzen, damit sie regulär verarbeitet wird.
-          REMOTE_MODE="n"
-          OPTIND=$((OPTIND - 1))
-          ;;
         *)
           echo "Ungültiger Remote-Modus '${OPTARG}'. Gültige Angaben: l|n|c"
           exit 1
@@ -94,14 +89,8 @@ while getopts "${OPTSTRING}" opt; do
     h) show_help; exit 0;;
     \?) echo "Unknown option: -${OPTARG}" >&2; exit 2;;
     :)
-      # -r darf ohne Argument stehen (Default-Modus n), alle anderen Optionen nicht
-      if [ "$OPTARG" = "r" ]; then
-        REMOTE=1
-        REMOTE_MODE="n"
-      else
-        echo "Option -$OPTARG erfordert ein Argument."
-        exit 1
-      fi
+      echo "Error: option -${OPTARG} requires an argument." >&2
+      exit 2
       ;;
   esac
 done
@@ -168,13 +157,6 @@ function remote_port_generation {
   REMOTE_PORT=$(( REMOTE_PORT + 10000 ))
 }
 
-function check_remote_port_availability {
-  local listeners
-  listeners=$(execute_remote_command "ss -H -tln") || return 2
-  if grep -qE ":${CURRENT_REMOTE_PORT}[^0-9]" <<< "${listeners}"; then return 1; fi
-  return 0
-}
-
 function remote_restore_commands {
   [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
   # Startet auf dem Remote-Host einen netcat-Sender, der die übergebene Quelle
@@ -187,7 +169,7 @@ function remote_restore_commands {
   fi
   CURRENT_REMOTE_PORT=$((10000 + (REMOTE_PORT - 10000 + PART_NUM) % 32768))
   while true; do
-    if check_remote_port_availability; then
+    if remote_port_matches free; then
       break
     else
       [ "$?" -eq 2 ] && return 1
@@ -209,7 +191,7 @@ function remote_restore_commands {
   ATTEMPT=1
   while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     echo "Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)..."
-    if execute_remote_command "ss -tuln | grep -qE :${CURRENT_REMOTE_PORT}[^0-9]"; then
+    if remote_port_matches listening; then
       echo "Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop."
       break
     else
@@ -307,22 +289,6 @@ function wait_for_jobs {
 }
 
 trap ddpar_cancel INT TERM
-
-function part_bytes {
-  # Bytes, die Teil $1 enthält: normale Teile SPLIT_SIZE, der letzte Teil
-  # zusätzlich den nicht gleichmäßig verteilbaren Rest; bei Backups kleiner
-  # als NUM_JOBS Blöcke ggf. weniger oder 0.
-  local part=$1
-  local start=$((part * SPLIT_SIZE))
-  local remaining=$((INPUT_SIZE - start))
-  if [ "${remaining}" -le 0 ]; then
-    echo 0
-  elif [ "${part}" -eq $((NUM_JOBS - 1)) ] || [ "${remaining}" -lt "${SPLIT_SIZE}" ]; then
-    echo "${remaining}"
-  else
-    echo "${SPLIT_SIZE}"
-  fi
-}
 
 function restore_split_image {
   echo "Starte die Prozesse ..."

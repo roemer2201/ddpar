@@ -4,33 +4,38 @@
 # release private resources on every exit path.
 # Version: 1.0.3 (2026-11-19)
 
-# Convert documented long aliases without changing data after -i/-o or --.
-# $1 is the caller's getopts string: only options with a required value
-# (X:, not X::) protect their next argument, independent of the script name.
+# Give getopts an explicit mode for bare -r, including at the end of a
+# cluster. Consume required arguments literally before converting aliases.
 ddpar_normalize_args() {
-  local optstring="${1}" arg opt needs_value=0 literal=0
+  local optstring="${1}" arg rest opt
   shift
   DDPAR_ARGS=()
-  for arg in "$@"; do
-    if [ "${needs_value}" -eq 1 ] || [ "${literal}" -eq 1 ]; then
-      DDPAR_ARGS+=("${arg}")
-      needs_value=0
-      continue
-    fi
+  while (( $# )); do
+    arg=${1}
+    shift
     case "${arg}" in
-      --) literal=1; DDPAR_ARGS+=(--) ;;
-      --help) DDPAR_ARGS+=(-h) ;;
-      --input) DDPAR_ARGS+=(-i); needs_value=1 ;;
-      --output) DDPAR_ARGS+=(-o); needs_value=1 ;;
-      -?)
-        DDPAR_ARGS+=("${arg}")
-        opt="${arg#-}"
-        if [ "${opt}" != : ] && [[ "${optstring}" == *"${opt}:"* && "${optstring}" != *"${opt}::"* ]]; then
-          needs_value=1
-        fi
-        ;;
-      *) DDPAR_ARGS+=("${arg}") ;;
+      --) DDPAR_ARGS+=(-- "$@"); break ;;
+      --help) arg=-h ;;
+      --input) arg=-i ;;
+      --output) arg=-o ;;
     esac
+    DDPAR_ARGS+=("${arg}")
+    [[ "${arg}" == -?* && "${arg}" != --* ]] || continue
+    rest=${arg#-}
+    while [[ -n "${rest}" ]]; do
+      opt=${rest:0:1}
+      rest=${rest:1}
+      [[ "${opt}" != : && "${optstring}" == *"${opt}:"* ]] || continue
+      if [[ -z "${rest}" ]]; then
+        if [[ "${opt}" == r && ( $# == 0 || "${1}" == -* ) ]]; then
+          DDPAR_ARGS+=(n)
+        elif (( $# )); then
+          DDPAR_ARGS+=("${1}")
+          shift
+        fi
+      fi
+      break
+    done
   done
 }
 
@@ -51,6 +56,22 @@ ddpar_geometry() {
     [ "${NUM_JOBS}" -le "$((9223372036854775807 / BLOCKSIZEBYTES))" ]; }; then
       echo 'Error: jobs and block size must be positive whole numbers within the supported range.' >&2
       return 2
+  fi
+}
+
+function part_bytes {
+  # Bytes, die Segment $1 umfasst: normale Segmente SPLIT_SIZE, das letzte
+  # zusätzlich den nicht gleichmäßig verteilbaren Rest; bei Eingaben kleiner
+  # als NUM_JOBS Blöcke ggf. weniger oder 0.
+  local part=$1
+  local start=$((part * SPLIT_SIZE))
+  local remaining=$((INPUT_SIZE - start))
+  if [ "${remaining}" -le 0 ]; then
+    echo 0
+  elif [ "${part}" -eq $((NUM_JOBS - 1)) ] || [ "${remaining}" -lt "${SPLIT_SIZE}" ]; then
+    echo "${remaining}"
+  else
+    echo "${SPLIT_SIZE}"
   fi
 }
 
@@ -225,6 +246,15 @@ NETWORK_TIMEOUT="${DDPAR_NETWORK_TIMEOUT:-300}"
 SSH_SOCKET_DIR=''
 SSH_CONNECTED=0
 
+# A subshell restores the caller's tracing flags even on authentication errors.
+ddpar_password_login() (
+  set +x
+  local password
+  IFS= read -r -s -p "SSH password for ${REMOTE_HOST}: " password || return 1
+  printf '\n' >&2
+  SSHPASS="${password}" sshpass -e ssh "$@" "${REMOTE_HOST}" true
+)
+
 # Each invocation owns a private ControlPath, so concurrent runs and different
 # hosts can never borrow or close one another's authenticated connection.
 connect_ssh() {
@@ -238,15 +268,14 @@ connect_ssh() {
   fi
   SSH_SOCKET_DIR=$(mktemp -d /tmp/ddpar-ssh.XXXXXX) || return 1
   SSH_SOCKET_PATH="${SSH_SOCKET_DIR}/control"
-  local output password
-  if output=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=5 \
-      -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=yes -o ControlPersist=yes -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" true 2>&1); then
+  local output
+  local -a options=(-n -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5
+    -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=yes
+    -o ControlPersist=yes -S "${SSH_SOCKET_PATH}")
+  if output=$(ssh "${options[@]}" -o BatchMode=yes "${REMOTE_HOST}" true 2>&1); then
     SSH_CONNECTED=1
   elif [[ "${output}" == *'Permission denied'* ]] && [ -t 0 ] && command -v sshpass >/dev/null; then
-    read -r -s -p "SSH password for ${REMOTE_HOST}: " password
-    printf '\n' >&2
-    SSHPASS="${password}" sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 \
-      -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=yes -o ControlPersist=yes -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" true || return 1
+    ddpar_password_login "${options[@]}" || return 1
     SSH_CONNECTED=1
   else
     printf '%s\n' "${output}" >&2
@@ -266,7 +295,14 @@ is_ssh_socket_alive() {
 # The remote login shell need not be Bash; explicitly enable pipefail in Bash
 # so a failed dd/zcat cannot be masked by a successful sha256sum.
 execute_remote_command() {
-  ssh -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "bash -o pipefail -c $(shell_quote "${1}")"
+  ssh -n -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "bash -o pipefail -c $(shell_quote "${1}")"
+}
+
+# Distinguish SSH/ss failure (2) from the opposite port state (1).
+remote_port_matches() {
+  local listeners
+  listeners=$(execute_remote_command "ss -H -ltn 'sport = :${CURRENT_REMOTE_PORT}'") || return 2
+  if [ "${1}" = free ]; then [ -z "${listeners}" ]; else [ -n "${listeners}" ]; fi
 }
 
 # A killed wrapper may remain as a zombie until init reaps it. kill -0 alone

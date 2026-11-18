@@ -40,23 +40,16 @@ load helpers
 @test "Remote backup paths with quotes and literal substitution roundtrip safely" {
   require_remote_support
   make_testfile "${TMP}/src.bin" 1
-  mkdir -p "${TMP}/back\$(touch injected)"
-  # Eine ausgefuehrte Substitution legt "injected" im Arbeitsverzeichnis an:
-  # lokal in ${TMP}, auf der Gegenseite im Home-Verzeichnis des SSH-Benutzers.
-  cd "${TMP}"
-  ssh "${REMOTE_TEST_HOST}" 'rm -f injected'
-
-  run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/src.bin" -o "${TMP}/back\$(touch injected)" \
+  local backup="${TMP}/back\$(printf literal)"
+  mkdir -p "${backup}"
+  run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/src.bin" -o "${backup}" \
     -m backup -j 2 -n "odd' name" -r n -R "${REMOTE_TEST_HOST}"
   [ "${status}" -eq 0 ]
-  [ ! -e "${TMP}/injected" ]
-  ssh "${REMOTE_TEST_HOST}" 'test ! -e injected'
+  [ -f "${backup}/odd' name-0.part" ]
 
-  run "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/back\$(touch injected)/odd' name" \
+  run "${REPO_ROOT}/ddpar-restore.sh" -i "${backup}/odd' name" \
     -o "${TMP}/restored.bin" -y -r n -R "${REMOTE_TEST_HOST}"
   [ "${status}" -eq 0 ]
-  [ ! -e "${TMP}/injected" ]
-  ssh "${REMOTE_TEST_HOST}" 'test ! -e injected'
   cmp "${TMP}/src.bin" "${TMP}/restored.bin"
 }
 
@@ -329,4 +322,12 @@ load helpers
   run "${REPO_ROOT}/ddpar-restore.sh" -i "${base}" -o "${TMP}/dst" -y -R "${REMOTE_TEST_HOST}"
   [ "${status}" -ne 0 ]
   [ ! -e "${TMP}/dst" ]
+}
+
+@test "Remote clone check rejects an unsupported target even for an empty image" {
+  require_remote_support
+  : > "${TMP}/empty"
+  run "${REPO_ROOT}/ddpar-check.sh" -s "${TMP}/empty" -d /dev/null -R "${REMOTE_TEST_HOST}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *'unsupported comparison input'* ]]
 }

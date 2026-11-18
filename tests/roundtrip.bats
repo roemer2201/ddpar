@@ -179,7 +179,7 @@ load helpers
   printf 'extra' >> "${TMP}/target.bin"
   vrun "${REPO_ROOT}/ddpar-check.sh" -s "${TMP}/source.bin" -d "${TMP}/target.bin" -j 1 -B 1
   [ "${status}" -ne 0 ]
-  [[ "${output}" == *"Zieldatei hat"* ]]
+  [[ "${output}" == *"FAILED comparison size"*"expected 6"* ]]
 }
 
 @test "Restore rejects a short backup part before opening the target" {

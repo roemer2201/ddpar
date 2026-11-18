@@ -327,3 +327,28 @@ EOF
   [ "${status}" -ne 0 ]
   [ -s "${TMP}/partial" ]
 }
+
+@test "Clone refuses dangling output links and an inherited FORCE cannot overwrite a file" {
+  printf source > "${TMP}/source"
+  ln -s absent "${TMP}/link"
+  vrun "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source" -o "${TMP}/link"
+  [ "${status}" -ne 0 ]
+  [ ! -e "${TMP}/absent" ]
+  printf keep > "${TMP}/existing"
+  vrun env FORCE=1 "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source" -o "${TMP}/existing"
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${TMP}/existing")" = keep ]
+}
+
+@test "Clusters preserve literal operands and invalid attached remote modes terminate" {
+  small_backup
+  cd "${TMP}"
+  vrun "${REPO_ROOT}/ddpar-restore.sh" -i backup/source -yPo --help
+  [ "${status}" -eq 0 ]
+  cmp source ./--help
+  for script in ddpar.sh ddpar-restore.sh ddpar-check.sh; do
+    vrun timeout 2 "${REPO_ROOT}/${script}" -r-invalid
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *'Remote-Modus'* ]]
+  done
+}

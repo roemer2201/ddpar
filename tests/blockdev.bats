@@ -58,6 +58,7 @@ load helpers
   [ "$status" -eq 0 ]
 
   run "$REPO_ROOT/ddpar-check.sh" -b "$TMP/backup/${base}" -s "$src"
+  [ "$status" -eq 0 ]
   [[ "$output" == *"OK"* ]]
   [[ "$output" != *"FAILED"* ]]
 }
