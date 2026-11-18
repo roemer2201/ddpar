@@ -29,9 +29,13 @@ for tool in ("ddpar", "ddpar-restore", "ddpar-check"):
         executable = bindir / name
         assert executable.is_file(), f"Missing or broken entry point: {executable}"
         run(executable, "--help")
+        completion = root / "usr/share/bash-completion/completions" / name
+        assert completion.is_file(), f"Missing completion: {completion}"
         run("bash", "--noprofile", "--norc", "-c",
             'source /usr/share/bash-completion/bash_completion; '
-            '_completion_loader "$1"; complete -p "$1"', "bash", name)
+            'if declare -F _comp_load >/dev/null; then _comp_load "$1"; '
+            'else _completion_loader "$1"; fi; '
+            '[[ $(complete -p "$1") == "complete -F _ddpar $1" ]]', "bash", name)
 
 assert not (bindir / "ddpar-common.sh").exists(), "Library must remain private"
 assert (root / "usr/lib/ddpar/ddpar-common.sh").is_file()

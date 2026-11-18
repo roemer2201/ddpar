@@ -11,7 +11,11 @@ setup() {
     source "${REPO_ROOT}/completions/ddpar"
     # Outside Readline, compgen does not dequote escaped prefixes. Unit inputs
     # are logical words; the separate PTY test covers actual Readline quoting.
-    _quote_readline_by_ref() { printf -v "${2}" '%s' "${1}"; }
+    if declare -F _comp_quote_compgen >/dev/null; then
+        _comp_quote_compgen() { REPLY=${1}; }
+    else
+        _quote_readline_by_ref() { printf -v "${2}" '%s' "${1}"; }
+    fi
     cd "${BATS_TEST_TMPDIR}"
     mkdir -p 'backup dir' 'input dir'
     touch 'input image' 'backup dir/disk image-metadata.txt' \
