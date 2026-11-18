@@ -37,7 +37,7 @@ Bauabhaengigkeiten und des fertigen Pakets benoetigt administrative Rechte:
 ```bash
 make install-build-deps
 make deb
-sudo apt install ../ddpar_1.1.0_all.deb
+sudo apt install "../ddpar_$(dpkg-parsechangelog -S Version)_all.deb"
 ```
 
 `make deb` verwendet `dpkg-buildpackage -us -uc -b` und schreibt `.deb`,
@@ -126,7 +126,7 @@ Argumente vorgeschlagen, da die Programme keine Positionsargumente akzeptieren.
 # Klonen Gerät -> Gerät mit 8 Jobs
 ./ddpar.sh -i /dev/sdb -o /dev/sdc -j 8
 
-# Clone prüfen (ohne Backup-Metadaten: -j/-B wie beim Clone angeben)
+# Clone prüfen (Segmentierung für den Vergleich frei wählbar)
 ./ddpar-check.sh -s /dev/sdb -d /dev/sdc -j 8
 ```
 
@@ -154,7 +154,7 @@ Argumente vorgeschlagen, da die Programme keine Positionsargumente akzeptieren.
 # Clone komprimiert übertragen: nur mit -r c (die Gegenseite dekomprimiert)
 ./ddpar.sh -i /dev/sdb -o /dev/sdc -m clone -c -r c -R user@zielhost
 
-# Remote-Check (nur SHA256-Hashes laufen über SSH)
+# Remote-Check (bei komprimiertem Backup im Modus n laufen die gzip-Teile über SSH)
 ./ddpar-check.sh -s /dev/sdb -b /remote/backup/sdb -r n -R user@zielhost
 ```
 
@@ -188,20 +188,26 @@ Verglichen werden in allen Fällen die Hashes der Rohdaten.
 - Host-Keys werden mit `StrictHostKeyChecking=accept-new` behandelt: Unbekannte
   Hosts werden beim Erstkontakt akzeptiert, ein **geänderter** Host-Key führt
   zum Abbruch.
-- Passwörter (optional via `sshpass`) werden über die Umgebung übergeben und
-  tauchen nicht in der Prozessliste auf. Im Debug-Modus (`-d`) können
-  Passwörter im Klartext ausgegeben werden.
+- Der optionale Passwort-Login übergibt das Passwort per Umgebung an
+  `sshpass`. Die Passwortabfrage und dieser Aufruf sind vom Shell-Tracing
+  ausgenommen. Die übrige Debug-Ausgabe enthält Befehle, Pfade und Hostnamen.
 
 ## Integrität und Zielschutz
 
 Ein Clone auf eine vorhandene Datei benötigt `-f`, auch wenn `-o` ein
 Verzeichnis ist. Ein noch nicht vorhandenes Dateiziel wird direkt angelegt.
 Symlinks zu Dateien und Blockgeräten werden beim Bestimmen von Typ und Größe
-aufgelöst; Quelle und Ziel dürfen lokal nicht dieselbe Datei sein.
+aufgelöst. Ein neuer Dateiclon reserviert den Zielnamen exklusiv. Erzeugte
+Backup-Pfade müssen fehlen oder reguläre Dateien mit genau einem Hardlink sein.
+Lokale Quelle und Ziel müssen unterschiedliche Dateien sein. Bei SSH-Transfers
+über gemeinsam eingehängte Dateisysteme müssen Quelle, Backup-Teile und Ziel
+auf getrennte Dateien zeigen.
 
 Vor einem Restore werden alle Teile auf ihre tatsächliche Rohdatenlänge
 geprüft. Komprimierte Teile werden dabei vollständig dekomprimiert, einschließlich
-CRC-Prüfung. Lokal vorhandene `.sha256`-Dateien werden ebenfalls geprüft.
+CRC-Prüfung. Bei neuen lokalen Backups mit `-s` sind sämtliche Prüfsummendateien
+für den Restore erforderlich, auch wenn das Backup später auf einem SSH-Host
+liegt. Bei älteren Backups prüft der Restore alle vorhandenen Prüfsummen.
 Reguläre Zieldateien erhalten exakt die gesicherte Länge; größere Blockgeräte
 behalten ihren Bereich hinter dem gesicherten Abbild.
 
@@ -215,7 +221,9 @@ Längenprüfung erfolgreich abgeschlossen sind. Erst dann wird der Status
 `complete` gesetzt. Restore und Check lehnen unvollständige Backups ab.
 Ältere Backups ohne dieses Feld bleiben lesbar. Ein erneutes Backup überschreibt
 weiterhin seine bisherigen Teile; für getrennte Generationen eigene Basisnamen
-oder Verzeichnisse verwenden. Während der Operation müssen Quelle und
+oder Verzeichnisse verwenden. Pro Basisname darf nur ein Schreibvorgang laufen.
+Bei einem abgebrochenen Ersatz enthält die Datei `*-metadata.txt.old` nur die
+früheren Metadaten. Während der Operation müssen Quelle und
 Backup-Dateien unverändert bleiben; ddpar erzeugt keinen Dateisystem-Snapshot.
 
 Jeder Remote-Aufruf verwendet einen eigenen privaten SSH-Control-Socket.
@@ -235,7 +243,7 @@ Alle Skripte enden mit Exit-Code `0` nur, wenn sämtliche parallelen
 Teil-Prozesse erfolgreich waren. Schlägt ein Teil fehl (z.B. Lesefehler,
 volle Platte, abgerissene Verbindung) oder meldet `ddpar-check.sh` eine
 Abweichung, ist der Exit-Code `!= 0` — damit sind die Skripte in eigenen
-Automatisierungen/CI verwendbar.
+Automatisierungen/CI verwendbar. Eine verneinte Restore-Rückfrage endet ebenfalls mit Status 0. Für einen unbeaufsichtigten Restore steht `-y` zur Verfügung.
 
 ## Tests und Entwicklung
 
@@ -245,79 +253,7 @@ make check             # ShellCheck-Gate + bats-Testsuite
 make test-integration  # Blockgerät- (root) und Remote-Tests (SSH)
 ```
 
-Details: [tests/README.md](tests/README.md), [TESTING.md](TESTING.md) (manuelle
-Szenarien), [testing-docker/](testing-docker/) (Zwei-Host-Testumgebung),
-[ARCHITECTURE.md](ARCHITECTURE.md) (Design).
-
-## Funktionsstatus
-
-### Lokal
-#### uncompressed
-
-| | clone (check) || backup (check) | restore (check) |
-|----------|----------|-|----------|----------|
-| block dev | :heavy_check_mark: (:heavy_check_mark:) || :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
-| file | :heavy_check_mark: (:heavy_check_mark:) || :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
-
-#### compressed
-| | backup gzip (check) | restore gzip (check) |
-|-----------|----------|----------|
-| block dev | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
-| file | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
-
-<br>
-
-### Remote — SSH
-#### general remote functionality (ssh)
-| |state|
-|-|-|
-| establish_ssh_connection | :heavy_check_mark: |
-| execute_command | :heavy_check_mark: |
-| execute_remote_command | :heavy_check_mark: |
-| execute_remote_background_command | :heavy_check_mark: |
-| close_ssh_connection | :heavy_check_mark: |
-| check_remote_commands_availability | :heavy_check_mark: |
-| remote_port_generation | :heavy_check_mark: |
-| check_remote_port_availability | :heavy_check_mark: |
-| output_analysis | :heavy_check_mark: |
-| remote_cloning_commands | :heavy_check_mark: |
-| remote_backup_commands | :heavy_check_mark: |
-
-<br>
-
-### Remote — netcat
-#### uncompressed
-| | clone (check) | | backup (check) | restore (check) |
-|-|----------|-|----------|----------|
-| block dev | :heavy_check_mark: (:heavy_check_mark:) | | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
-| file | :heavy_check_mark: (:heavy_check_mark:) | | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
-
-#### local [de]compression
-Kompression/Dekompression laufen lokal, über netcat geht nur der komprimierte
-Strom; die Remote-Seite benötigt kein `gzip`.
-
-| | backup gzip (check) | restore gzip (check) |
-|-|----------|----------|
-| block dev | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
-| file | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
-
-#### remote [de]compression (`-r c`)
-`gzip`/`zcat` laufen auf der Gegenseite (dort erforderlich); über netcat gehen
-die Rohdaten. Der Check hasht remote, es geht nur der Hash über SSH.
-
-| | backup gzip (check) | restore gzip (check) |
-|-----------|----------|----------|
-| block dev | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
-| file | :heavy_check_mark: (:heavy_check_mark:) | :heavy_check_mark: (:heavy_check_mark:) |
-
-#### compressed transfer (compression+decompression before and after transfer)
-Clone mit `-c` + `-r c`: lokal wird komprimiert, die Gegenseite dekomprimiert
-vor dem Schreiben.
-
-| | clone |
-|----------|----------|
-| block dev | :heavy_check_mark: |
-| file | :heavy_check_mark: |
+[Testanleitung](TESTING.md) · [Docker-Testumgebung](testing-docker/README.md) · [Architektur und Backup-Format](ARCHITECTURE.md) · [Versionshistorie](CHANGELOG.md)
 
 ## To Do
 

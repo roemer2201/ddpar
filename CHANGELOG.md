@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.1] – 19. November 2026
+
+- Vorhandene Backup-Artefakte werden auf Typ und Hardlinks geprüft. Neue Dateiclones reservieren ihren Zielnamen exklusiv.
+- Restore und Check lesen vollständige Metadaten, erhalten wörtliche Basisnamen und prüfen die angekündigten SHA256-Dateien auch bei einem per SSH gelesenen Backup.
+- Restore verwendet bereits zugewiesenen Speicherplatz am Dateiziel. Clone-Checks prüfen den Typ und die Größe am jeweiligen Host.
+- Korrekturen für gruppierte Optionen, die SSH-Passwortabfrage im Debug-Modus und die TCP-Portprüfung.
+- Die Bash-Completion unterstützt ältere und aktuelle Hilfsfunktionen. Der Pakettest prüft den tatsächlich registrierten Handler.
+- Der Docker-Test verwendet eigene SSH-Schlüssel je Container und wertet den Exitstatus aller Vergleiche aus. GitHub Actions prüft den Zwei-Container-Aufbau.
+
 ## [1.1.0] – Bash-Completion und Debian-Paket
 
 ### Bash-Completion
@@ -23,7 +32,7 @@
   (`allow-stderr`, da `dd` seine Statistik auf stderr ausgibt), und CI-Job, der
   das Paket baut, mit Lintian prüft und das `.deb` als Artefakt bereitstellt.
 
-## [Unreleased] – Nachkorrekturen zum vollständigen Review
+### Nachkorrekturen zum vollständigen Review
 
 - `ddpar.sh` prüfte den Backup-Basisnamen wegen eines überzähligen `--` nicht; Namen mit Zeilenumbruch werden jetzt abgelehnt.
 - Lange Aliase werden anhand des getopts-Strings des jeweiligen Skripts normalisiert statt anhand von `$0`; Werte nach `-s`/`-d` bleiben auch bei Aufruf ohne `.sh`-Endung unverändert.
@@ -33,7 +42,7 @@
 - Clone-Check übergibt die Quelle mit `--` an `stat`; zu kleine Blockgeräte werden mit Meldung statt stumm abgelehnt.
 - Mindestversion Bash 4.4 dokumentiert; verwaiste Kommentare und Tippfehler entfernt.
 
-## [Unreleased] – Vollständiges Review vom 17.10.2026
+### Vollständiges Review vom 17.10.2026
 
 - Lokale Checks lesen tatsächliche Backup-Teile und prüfen Länge, gzip-CRC sowie Prüfsummen.
 - Restore prüft alle Rohdatenlängen und verfügbare lokale SHA256-Dateien vor dem Schreiben; Dateiziele werden exakt gekürzt, leere Abbilder unterstützt.
@@ -46,7 +55,7 @@
 - `-r l` wird abgelehnt, statt unverschlüsselt fortzusetzen. Dokumentierte lange CLI-Aliase funktionieren; unbekannte Optionen und zusätzliche Argumente führen zum Fehler.
 - Regressionstests und Dokumentation ergänzt; vollständiges ShellCheck-Ergebnis ist nun verbindliches CI-Gate.
 
-## [Unreleased] – Review-Korrekturen
+### Review-Korrekturen
 
 - Lokale Pfade werden ohne `eval` als Argumente übergeben; Remote-Pfade werden
   für die Shell gequotet. Leerzeichen, Apostrophe und wörtliche `$()`-Ausdrücke
@@ -70,7 +79,7 @@
 - Regressionstests für diese Fälle und für wiederholte Backups mit Leerzeichen
   im Basisnamen ergänzt.
 
-## [Unreleased] – branch claude/remote-netcat-decompression-fdxwqa (Remote netcat mit Remote-[De]Kompression)
+## Remote netcat mit Remote-[De]Kompression (`claude/remote-netcat-decompression-fdxwqa`)
 
 ### Hinzugefügt
 - **Remote-Modus `c` (`-r c`) umgesetzt:** `gzip`/`zcat` laufen auf der
@@ -120,7 +129,7 @@
 - Dokumentation (README-Matrix, ARCHITECTURE, TESTING, CLAUDE.md, Test-READMEs)
   auf die beiden Kompressionsvarianten umgestellt
 
-## [Unreleased] – branch claude/remote-netcat-local-compression-z8sk5b (Remote netcat mit lokaler [De]Kompression)
+## Remote netcat mit lokaler [De]Kompression (`claude/remote-netcat-local-compression-z8sk5b`)
 
 ### Hinzugefügt
 - **Remote-Backup komprimiert (`-c` + `-r n`):** `gzip` läuft auf der lokalen
@@ -152,7 +161,7 @@
 - **ddpar-restore.sh Port-Prüfung:** `grep -qE ":PORT[^0-9]"` statt `grep -q
   ":PORT"` — ein belegter Port 12345 galt sonst auch für Port 1234 als belegt
 
-## [Unreleased] – branch claude/ddpar-open-items-dawpvl (Quick Wins aus der To-Do-Liste)
+## Quick Wins aus der To-Do-Liste (`claude/ddpar-open-items-dawpvl`)
 
 ### Hinzugefügt
 - **ddpar.sh `-n NAME`:** eigener Basisname für die Backup-Dateien (Default
@@ -182,7 +191,7 @@
 - **TESTING.md:** veralteten Hinweis „Clone-Check nicht implementiert“
   entfernt und Abschnitt 3.3 (Clone-Check Source ↔ Destination) ergänzt
 
-## [Unreleased] – branch claude/project-improvement-review-fe3jux (konsolidierter Stack)
+## konsolidierter Stack (`claude/project-improvement-review-fe3jux`)
 
 ### Hinzugefügt
 - **Beliebige Eingabegrößen:** `size_calculation` rundet `SPLIT_SIZE` auf ein
@@ -218,7 +227,7 @@
 - README vollständig überarbeitet (Schnellstart, Voraussetzungen,
   Sicherheitshinweise, Exit-Codes, aktualisierte Funktionsmatrix)
 
-## [Unreleased] – branch claude/great-cori-29qjug (auf testing-docker aufbauend)
+## auf testing-docker aufbauend (`claude/great-cori-29qjug`)
 
 ### Hinzugefügt
 - Automatisierte Testpipeline: GitHub-Actions-Workflow (`.github/workflows/ci.yml`)
@@ -249,7 +258,7 @@
   weitergab → Typ-Erkennung des Zielgeräts schlug fehl. Lokale Ausführung nutzt
   nun `eval "${command}"` (analog zur Remote-Seite und zu `eval "${FULL_CMD}"`)
 
-## [Unreleased] – branch claude/review-ddpar-bugs-bc3la
+## Korrekturen vor 1.1.0 (`claude/review-ddpar-bugs-bc3la`)
 
 ### Hinzugefügt
 - `TESTING.md` mit Beispielkommandos für alle Übertragungsvarianten
