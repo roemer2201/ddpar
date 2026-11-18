@@ -57,7 +57,7 @@ vshow() {
   fi
 }
 
-# shellcheck disable=SC2317  # Funktionsrumpf wird via trap aufgerufen
+# shellcheck disable=SC2317,SC2329  # Called indirectly by the EXIT trap.
 cleanup() {
   if [ "$KEEP" -eq 1 ]; then
     info "Container laufen weiter (--keep). Aufräumen mit: $DC down -v"
