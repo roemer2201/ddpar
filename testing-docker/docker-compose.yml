@@ -7,10 +7,12 @@ services:
     environment:
       DDPAR_ROLE: source
       TEST_SIZE_MB: ${TEST_SIZE_MB:-64}
-      ROOT_PASSWORD: ${ROOT_PASSWORD:-ddpar}
+      ROOT_PASSWORD: ${ROOT_PASSWORD:-}
     volumes:
       # Die ddpar-Skripte aus dem Repo-Root read-only einbinden
       - ../:/opt/ddpar:ro
+      - source-pub:/run/ddpar-public
+      - target-pub:/run/ddpar-peer:ro
     working_dir: /opt/ddpar
     networks:
       - ddpar
@@ -24,9 +26,11 @@ services:
     hostname: target
     environment:
       DDPAR_ROLE: target
-      ROOT_PASSWORD: ${ROOT_PASSWORD:-ddpar}
+      ROOT_PASSWORD: ${ROOT_PASSWORD:-}
     volumes:
       - ../:/opt/ddpar:ro
+      - target-pub:/run/ddpar-public
+      - source-pub:/run/ddpar-peer:ro
     working_dir: /opt/ddpar
     networks:
       - ddpar
@@ -35,3 +39,7 @@ services:
 networks:
   ddpar:
     driver: bridge
+
+volumes:
+  source-pub:
+  target-pub:

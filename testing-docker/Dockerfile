@@ -18,19 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       sed \
       gawk \
       debianutils \
-    && rm -rf /var/lib/apt/lists/*
-
-# SSH: Root-Login per Key und Passwort erlauben (nur Testumgebung!).
-# Ein fester Schlüssel wird ins Image gebacken; da beide Container (source und
-# target) aus diesem Image starten, teilen sie sich den Key und koennen sich
-# gegenseitig passwortlos per SSH erreichen.
-RUN mkdir -p /var/run/sshd /root/.ssh \
-    && chmod 700 /root/.ssh \
-    && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
-    && sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
-    && ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519 \
-    && cp /root/.ssh/id_ed25519.pub /root/.ssh/authorized_keys \
-    && chmod 600 /root/.ssh/authorized_keys /root/.ssh/id_ed25519
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /etc/ssh/ssh_host_*_key* \
+    && install -d -m 0700 /root/.ssh \
+    && install -d /run/sshd
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
