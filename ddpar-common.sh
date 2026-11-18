@@ -2,7 +2,7 @@
 # Shared validation and SSH helpers for ddpar; source from the three commands.
 # Flow: validate decimal metadata; verify complete parts; isolate SSH sessions;
 # release private resources on every exit path.
-# Version: 1.0.2 (2026-10-17)
+# Version: 1.0.3 (2026-11-19)
 
 # Convert documented long aliases without changing data after -i/-o or --.
 # $1 is the caller's getopts string: only options with a required value
@@ -63,13 +63,17 @@ ddpar_basename() {
 # Parse data, never source it. Reject duplicate keys and unsafe numeric values
 # before using them in arithmetic or interpolating them into remote commands.
 ddpar_read_metadata() {
-  local key value
+  local line key value
   local -A seen=()
   NUM_JOBS='' BLOCKSIZEBYTES='' SPLIT_SIZE='' INPUT_SIZE=''
-  FILE_NAME='' COMPRESSION='' BACKUP_STATE=''
-  while IFS='=' read -r key value || [ -n "${key}" ]; do
+  FILE_NAME='' COMPRESSION='' BACKUP_STATE='' PART_CHECKSUMS=''
+  while IFS= read -r line || [ -n "${line}" ]; do
+    # Only the first '=' is a separator; a trailing '=' belongs to the name.
+    [[ "${line}" == *=* ]] || continue
+    key=${line%%=*}
+    value=${line#*=}
     case "${key}" in
-      NUM_JOBS|BLOCKSIZEBYTES|SPLIT_SIZE|INPUT_SIZE|FILE_NAME|COMPRESSION|BACKUP_STATE)
+      NUM_JOBS|BLOCKSIZEBYTES|SPLIT_SIZE|INPUT_SIZE|FILE_NAME|COMPRESSION|BACKUP_STATE|PART_CHECKSUMS)
         if [[ -v seen[${key}] ]]; then
           echo "Error: duplicate metadata key: ${key}" >&2
           return 1
@@ -99,10 +103,14 @@ ddpar_read_metadata() {
     1) ;;
     *) echo 'Error: unsupported COMPRESSION in metadata.' >&2; return 1 ;;
   esac
-  case "${BACKUP_STATE}" in
-    ''|complete) ;;
-    *) echo 'Error: backup is incomplete.' >&2; return 1 ;;
+  case "${PART_CHECKSUMS}" in
+    ''|0|1) ;;
+    *) echo 'Error: invalid PART_CHECKSUMS in metadata.' >&2; return 1 ;;
   esac
+  if [[ -v seen[BACKUP_STATE] && "${BACKUP_STATE}" != complete ]]; then
+    echo 'Error: backup is incomplete.' >&2
+    return 1
+  fi
 }
 
 # Decode an entire part so gzip CRC/trailer errors cannot be hidden by dd's
@@ -119,13 +127,13 @@ ddpar_part_stream() {
 # sufficient: its size field wraps at 4 GiB and concatenated members are valid.
 ddpar_verify_part() {
   local path="${1}" expected="${2}" actual
+  if [ ! -f "${path}" ] || [ ! -r "${path}" ]; then
+    echo "Error: missing or unreadable backup part: ${path}" >&2
+    return 1
+  fi
   if [ -n "${COMPRESSION}" ]; then
     actual=$(ddpar_part_stream "${path}" | wc -c) || return 1
   else
-    if [ ! -f "${path}" ] || [ ! -r "${path}" ]; then
-      echo "Error: missing or unreadable backup part: ${path}" >&2
-      return 1
-    fi
     actual=$(stat -Lc %s -- "${path}") || return 1
   fi
   if [ "${actual}" -ne "${expected}" ]; then
@@ -137,13 +145,49 @@ ddpar_verify_part() {
 # Read only the digest of a stdin checksum record. Never let an untrusted
 # sidecar make sha256sum open an arbitrary path via its filename field.
 ddpar_checksum() {
-  local digest marker extra
-  IFS=' ' read -r digest marker extra < "${1}" || return 1
-  [[ "${digest}" =~ ^[[:xdigit:]]{64}$ && "${marker}" == '-' && -z "${extra}" ]] || {
-    echo "Error: invalid checksum record: ${1}" >&2; return 1;
-  }
-  [ "$(wc -l < "${1}")" -eq 1 ] || return 1
+  local digest marker extra tail
+  [ -f "${1}" ] || { echo "Error: missing checksum file: ${1}" >&2; return 1; }
+  {
+    IFS=' ' read -r digest marker extra &&
+      [[ "${digest}" =~ ^[[:xdigit:]]{64}$ && "${marker}" == '-' && -z "${extra}" ]] &&
+      ! IFS= read -r -n 1 tail
+  } < "${1}" || { echo "Error: invalid checksum record: ${1}" >&2; return 1; }
   printf '%s\n' "${digest,,}"
+}
+
+# Legacy backups did not declare sidecars. Validate any present record and
+# require every record if the writer advertised a checksummed backup.
+ddpar_expected_checksum() {
+  if [[ "${2}" == 1 || -e "${1}" || -L "${1}" ]]; then
+    ddpar_checksum "${1}"
+  fi
+}
+
+# Read metadata in full. A failed SSH command can leave a nonempty prefix
+# containing enough legacy fields to pass the parser.
+ddpar_fetch_metadata() {
+  if ! execute_remote_command "test -f $(shell_quote "${1}") && cat -- $(shell_quote "${1}")" > "${2}" || [ ! -s "${2}" ]; then
+    echo "Error: could not read remote metadata: ${1}" >&2
+    return 1
+  fi
+}
+
+# Keep paths out of checksum records and use gzip on the selected host.
+ddpar_remote_part_hash() {
+  local path
+  path=$(shell_quote "${1}")
+  if [ -z "${COMPRESSION}" ]; then
+    execute_remote_command "test -f ${path} && sha256sum < ${path}"
+  elif [ "${REMOTE_MODE}" = c ]; then
+    execute_remote_command "test -f ${path} && gzip -dc < ${path} | sha256sum"
+  else
+    execute_remote_command "test -f ${path} && cat -- ${path}" | gzip -dc | sha256sum
+  fi | cut -d' ' -f1
+}
+
+# Check a remote sidecar using the same parser as local backups.
+ddpar_remote_expected_checksum() {
+  execute_remote_command "$(declare -f ddpar_checksum ddpar_expected_checksum); ddpar_expected_checksum $(shell_quote "${1}") $(shell_quote "${PART_CHECKSUMS}")"
 }
 
 # Count the received stream as well as checking dd's status: EOF is not a dd

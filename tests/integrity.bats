@@ -273,3 +273,57 @@ EOF
   [ "${status}" -eq 0 ]
   [[ "${output}" == *'Segment 0: OK'* ]]
 }
+
+@test "Backup preflight refuses hard links and special files before modifying metadata" {
+  small_backup -j 1
+  cp "${TMP}/backup/source-metadata.txt" "${TMP}/metadata"
+  ln "${TMP}/backup/source-0.part" "${TMP}/unrelated"
+  printf replacement > "${TMP}/source"
+  vrun "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source" -o "${TMP}/backup" -m backup -j 1
+  [ "${status}" -ne 0 ]
+  cmp "${TMP}/metadata" "${TMP}/backup/source-metadata.txt"
+  [ "$(cat "${TMP}/unrelated")" = 1234567890123456789 ]
+  rm "${TMP}/backup/source-0.part"
+  mkfifo "${TMP}/backup/source-0.part"
+  vrun timeout 5 "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source" -o "${TMP}/backup" -m backup -j 1
+  [ "${status}" -eq 1 ]
+  cmp "${TMP}/metadata" "${TMP}/backup/source-metadata.txt"
+}
+
+@test "Backup prefixes are literal, including trailing equals and unrelated symlinks" {
+  small_backup -n 'disk=' -s
+  mkdir "${TMP}/dest"
+  ln -s unrelated "${TMP}/backup/disk="
+  vrun "${REPO_ROOT}/ddpar-check.sh" -b "${TMP}/backup/disk=" -s "${TMP}/source"
+  [ "${status}" -eq 0 ]
+  vrun "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/backup/disk=" -o "${TMP}/dest" -y
+  [ "${status}" -eq 0 ]
+  cmp "${TMP}/source" "${TMP}/dest/disk="
+}
+
+@test "Restore requires advertised checksums and rejects trailing checksum data" {
+  small_backup -s
+  printf keep > "${TMP}/target"
+  printf garbage >> "${TMP}/backup/source-0.sha256"
+  vrun "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/backup/source" -o "${TMP}/target" -y
+  [ "${status}" -ne 0 ]
+  rm "${TMP}/backup/source-0.sha256"
+  vrun "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/backup/source" -o "${TMP}/target" -y
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${TMP}/target")" = keep ]
+  # Pre-marker backups still accept missing sidecars.
+  sed -i '/^PART_CHECKSUMS=/d' "${TMP}/backup/source-metadata.txt"
+  vrun "${REPO_ROOT}/ddpar-restore.sh" -i "${TMP}/backup/source" -o "${TMP}/target" -y
+  [ "${status}" -eq 0 ]
+  cmp "${TMP}/source" "${TMP}/target"
+}
+
+@test "A failed remote metadata download cannot be parsed as a legacy backup" {
+  vrun bash -c '
+    source "$1/ddpar-common.sh"
+    execute_remote_command() { printf "NUM_JOBS=1\nBLOCKSIZEBYTES=1\nSPLIT_SIZE=1\n"; return 255; }
+    ddpar_fetch_metadata unused "$2/partial"
+  ' bash "${REPO_ROOT}" "${TMP}"
+  [ "${status}" -ne 0 ]
+  [ -s "${TMP}/partial" ]
+}

@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Clone or back up files and block devices in parallel segments.
-# Version: 1.0.3 (2026-10-17)
+# Version: 1.0.4 (2026-11-19)
 # Flow: validate options and endpoints; calculate segments; run local or remote
 # workers; collect every worker's result before reporting success.
 
@@ -485,7 +485,7 @@ function part_bytes {
 function clone_file {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
     # generate further spinoff variables
-    INPUT_FILE_NAME=$(basename -- "${INPUT}")
+    INPUT_FILE_NAME=${INPUT##*/}
 
     # Resolve the actual filename before enforcing overwrite protection.
     if execute_command test -d "${OUTPUT}"; then
@@ -676,11 +676,33 @@ function setup_remote_listener {
 	fi
 }
 
+# Check each generated name before any metadata or data file is opened.
+ddpar_check_artifacts() {
+	local prefix="${1}" jobs="${2}" source="${3:-}" part name links
+	local -a names=(metadata.txt metadata.txt.old)
+	for ((part=0; part<jobs; part++)); do
+		names+=("${part}.part" "${part}.gz" "${part}.sha256")
+	done
+	for name in "${names[@]}"; do
+		name="${prefix}${name}"
+		if [[ ! -e "${name}" && ! -L "${name}" ]]; then continue; fi
+		if [[ -L "${name}" || ! -f "${name}" || ( -n "${source}" && "${source}" -ef "${name}" ) ]]; then
+			echo "Error: unsafe backup output: ${name}" >&2
+			return 1
+		fi
+		links=$(stat -c %h -- "${name}") || return 1
+		if [[ "${links}" != 1 ]]; then
+			echo "Error: backup output has multiple hard links: ${name}" >&2
+			return 1
+		fi
+	done
+}
+
 function backup_mode {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
 	# Sichert die Eingabe in NUM_JOBS Teil-Dateien (.part bzw. .gz) inklusive
 	# Metadatendatei. Bei REMOTE=1 landen die Teile per netcat auf dem Remote-Host.
-	if [[ "${OUTPUT_FILE_TYPE}" != *"directory"* ]]; then
+	if ! execute_command test -d "${OUTPUT}"; then
 		echo -e "${ERRORCOLOR}Fehler: Ungültiger Ausgabe-Typ ${OUTPUT_FILE_TYPE}. Erforderlich: directory.${NOCOLOR}"
 		exit 1
 	fi
@@ -699,7 +721,7 @@ function backup_mode {
 	echo -e "${SUCCESSCOLOR}Führe die Backup-Aktion durch.${NOCOLOR}"
 
 	# generate further spinoff variables
-	INPUT_FILE_NAME=$(basename -- "${INPUT}")
+	INPUT_FILE_NAME=${INPUT##*/}
 	# Eigener Basisname via -n, sonst Basename der Eingabe
 	OUTPUT_FILE_NAME=${BASE_NAME:-${INPUT_FILE_NAME}}
 	OUTPUT_FILE="${OUTPUT}/${OUTPUT_FILE_NAME}-"
@@ -709,19 +731,13 @@ function backup_mode {
 		echo 'Error: backup basename must fit one metadata line.' >&2
 		return 1
 	fi
-	# Reject generated symlinks and source aliases before any output is opened.
-	local artifact part suffix
-	local artifacts=("${METADATA_FILE}" "${METADATA_FILE}.old")
-	for ((part=0; part<NUM_JOBS; part++)); do
-		for suffix in part gz sha256; do artifacts+=("${OUTPUT_FILE}${part}.${suffix}"); done
-	done
-	for artifact in "${artifacts[@]}"; do
-		if execute_command test -L "${artifact}" ||
-		   { [ "${REMOTE}" -ne 1 ] && [ "${INPUT}" -ef "${artifact}" ]; }; then
-			echo "Error: unsafe backup output: ${artifact}" >&2
-			return 1
-		fi
-	done
+	# Validate the generated entries together on the output host. Reusing a
+	# multiply-linked file would also overwrite every other name for that inode.
+	if [ "${REMOTE}" -eq 1 ]; then
+		execute_remote_command "$(declare -f ddpar_check_artifacts); ddpar_check_artifacts $(shell_quote "${OUTPUT_FILE}") ${NUM_JOBS}" || return 1
+	else
+		ddpar_check_artifacts "${OUTPUT_FILE}" "${NUM_JOBS}" "${INPUT}" || return 1
+	fi
 
 	# Write metadata file (lokal oder remote)
 	if [ $REMOTE -eq 1 ]; then
@@ -745,6 +761,9 @@ function backup_mode {
 	append_metadata "BACKUP_STATE=incomplete" || return 1
 	append_metadata "NUM_JOBS=${NUM_JOBS}" || return 1
 	# FILE_NAME = Basisname der Backup-Dateien (bei -n abweichend von INPUT_FILE_NAME)
+	if [ "${CHECKSUM}" -eq 1 ] && [ "${REMOTE}" -eq 0 ]; then
+		append_metadata "PART_CHECKSUMS=1" || return 1
+	fi
 	append_metadata "FILE_NAME=${OUTPUT_FILE_NAME}" || return 1
 	append_metadata "BLOCKSIZEBYTES=${BLOCKSIZEBYTES}" || return 1
 	append_metadata "INPUT_SIZE=${INPUT_SIZE}" || return 1

@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Restore segmented backups into a file or block device.
-# Version: 1.0.3 (2026-10-17)
+# Version: 1.0.4 (2026-11-19)
 # Flow: read and validate metadata and parts; prepare the target; restore all
 # segments; collect local and remote worker results.
 
@@ -328,7 +328,6 @@ function restore_split_image {
   echo "Starte die Prozesse ..."
   if [ ! -b "${OUTPUT_FILE}" ]; then
     # conv=notrunc protects parallel workers, so truncate exactly once up front.
-    truncate -s "${INPUT_SIZE}" -- "${OUTPUT_FILE}" || { INTERNAL_EXITCODE=1; return 1; }
     if [ "$SKIP_PREALLOC" -eq 1 ]; then
       echo "Vorab-Reservierung des Zielplatzes übersprungen (-P)."
     elif [ "${INPUT_SIZE}" -eq 0 ]; then
@@ -337,12 +336,13 @@ function restore_split_image {
       echo "Warnung: fallocate ist nicht verfügbar, Vorab-Reservierung wird übersprungen."
     else
       echo "fallocate -l ${INPUT_SIZE} $OUTPUT_FILE"
-      if ! fallocate -l "${INPUT_SIZE}" "${OUTPUT_FILE}"; then
+      if ! fallocate -l "${INPUT_SIZE}" -- "${OUTPUT_FILE}"; then
         echo "Fehler: Speicherplatz für ${OUTPUT_FILE} konnte nicht reserviert werden (fallocate). Mit -P kann die Reservierung übersprungen werden."
         INTERNAL_EXITCODE=1
         return 1
       fi
     fi
+    truncate -s "${INPUT_SIZE}" -- "${OUTPUT_FILE}" || { INTERNAL_EXITCODE=1; return 1; }
   fi
 
   local PART_NUM START COUNT_BYTES
@@ -382,7 +382,7 @@ function restore_split_image {
         break
       fi
       echo "nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT} </dev/null | zcat | ${dd_out[*]}"
-      nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" </dev/null | zcat | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
+      nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" </dev/null | gzip -dc | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
     elif [ $REMOTE -eq 1 ]; then
       # Remote netcat restore, unkomprimiert: Remote sendet, lokal wird empfangen und geschrieben
       if [ $PART_NUM -eq 0 ]; then
@@ -418,14 +418,10 @@ if [ -z "${INPUT:-}" ] || [ -z "${OUTPUT:-}" ]; then
   exit 2
 fi
 
-# Create spinoff variables
-INPUT_PATH=$(dirname -- "${INPUT}")
-INPUT_FILE_BASENAME=$(basename -- "${INPUT}")
-INPUT_FILES="${INPUT_PATH}/${INPUT_FILE_BASENAME}-"
-#OUTPUT_PATH=/dev
-#OUTPUT_FILE_BASENAME=sdi
-#OUTPUT_FILE="${OUTPUT_PATH}/${OUTPUT_FILE_BASENAME}"
-OUTPUT_FILE_TYPE="$(file -Lb -- "${OUTPUT}")"
+# The argument is a filename prefix, even if an unrelated file has that name.
+INPUT_FILE_BASENAME=${INPUT##*/}
+ddpar_basename "${INPUT_FILE_BASENAME}" || { echo 'Error: invalid backup basename.' >&2; exit 2; }
+INPUT_FILES="${INPUT}-"
 METADATA_FILE="${INPUT_FILES}metadata.txt"
 
 # Get parameters from metadata file (lokal oder remote)
@@ -437,17 +433,11 @@ if [ $REMOTE -eq 1 ]; then
     fi
   done
   connect_ssh || exit 1
-  METADATA_SRC=$(mktemp)
-  execute_remote_command "cat -- $(shell_quote "${METADATA_FILE}")" > "${METADATA_SRC}" 2>/dev/null
-  if [ ! -s "$METADATA_SRC" ]; then
-    echo "Die Metadatendatei $METADATA_FILE auf $REMOTE_HOST existiert nicht oder ist leer."
-    rm -f "$METADATA_SRC"
-    close_ssh_connection
-    exit 1
-  fi
+  METADATA_SRC=$(mktemp) || exit 1
+  ddpar_fetch_metadata "${METADATA_FILE}" "${METADATA_SRC}" || exit 1
 else
   METADATA_SRC="$METADATA_FILE"
-  if [ ! -e "$METADATA_SRC" ]; then
+  if [ ! -f "$METADATA_SRC" ]; then
     echo "Die Datei existiert $METADATA_FILE nicht."
     exit 1
   fi
@@ -464,13 +454,13 @@ fi
 # auspackenden Seite vorhanden sein.
 if [ -n "$COMPRESSION" ]; then
   if [ $REMOTE -eq 1 ] && [ "$REMOTE_MODE" = "c" ]; then
-    if ! execute_remote_command "command -v zcat > /dev/null 2>&1"; then
+    if ! execute_remote_command "command -v gzip > /dev/null 2>&1"; then
       echo "Fehler: Das Backup ist komprimiert und -r c verlangt zcat (gzip) auf ${REMOTE_HOST}, dort ist es nicht verfügbar."
       rm -f "$METADATA_SRC"
       close_ssh_connection
       exit 1
     fi
-  elif ! command -v zcat > /dev/null 2>&1; then
+  elif ! command -v gzip > /dev/null 2>&1; then
     echo "Fehler: Das Backup ist komprimiert, aber zcat (gzip) ist lokal nicht verfügbar."
     if [ $REMOTE -eq 1 ]; then
       rm -f "$METADATA_SRC"
@@ -495,9 +485,9 @@ for ((part=0; part<NUM_JOBS; part++)); do
   if [ "${REMOTE}" -eq 1 ]; then
     if [ -n "${COMPRESSION}" ]; then
       if [ "${REMOTE_MODE}" = c ]; then
-        part_size=$(execute_remote_command "gzip -dc -- $(shell_quote "${part_file}") | wc -c") || exit 1
+        part_size=$(execute_remote_command "test -f $(shell_quote "${part_file}") && gzip -dc < $(shell_quote "${part_file}") | wc -c") || exit 1
       else
-        part_size=$(execute_remote_command "cat -- $(shell_quote "${part_file}")" | gzip -dc | wc -c) || exit 1
+        part_size=$(execute_remote_command "test -f $(shell_quote "${part_file}") && cat -- $(shell_quote "${part_file}")" | gzip -dc | wc -c) || exit 1
       fi
     else
       part_size=$(execute_remote_command "test -f $(shell_quote "${part_file}") && stat -Lc %s -- $(shell_quote "${part_file}")") || exit 1
@@ -508,93 +498,44 @@ for ((part=0; part<NUM_JOBS; part++)); do
     fi
   else
     ddpar_verify_part "${part_file}" "$(part_bytes "${part}")" || exit 1
-    if [ -e "${INPUT_FILES}${part}.sha256" ]; then
-      expected=$(ddpar_checksum "${INPUT_FILES}${part}.sha256") || exit 1
+  fi
+  sidecar="${INPUT_FILES}${part}.sha256"
+  if [ "${REMOTE}" -eq 1 ]; then
+    expected=$(ddpar_remote_expected_checksum "${sidecar}") || exit 1
+  else
+    expected=$(ddpar_expected_checksum "${sidecar}" "${PART_CHECKSUMS}") || exit 1
+  fi
+  if [ -n "${expected}" ]; then
+    if [ "${REMOTE}" -eq 1 ]; then
+      actual=$(ddpar_remote_part_hash "${part_file}") || exit 1
+    else
       actual=$(ddpar_part_stream "${part_file}" | sha256sum | cut -d' ' -f1) || exit 1
-      if [ "${expected}" != "${actual}" ]; then
-        echo "Error: backup checksum mismatch: ${part_file}" >&2
-        exit 1
-      fi
+    fi
+    if [ "${expected}" != "${actual}" ]; then
+      echo "Error: backup checksum mismatch: ${part_file}" >&2
+      exit 1
     fi
   fi
 done
 
-# Überprüfung der erforderlichen Parameter
-if [ -z "$INPUT_PATH" ] || [ -z "$INPUT_FILE_BASENAME" ] || [ -z "$OUTPUT" ]; then
-  echo "Fehlende Parameter. Bitte geben Sie alle erforderlichen Parameter an."
+# Resolve a directory destination once. Inspect the actual target before
+# preallocation, including device links within the specified directory.
+OUTPUT_FILE=${OUTPUT}
+if [ -d "${OUTPUT}" ]; then
+  OUTPUT_FILE="${OUTPUT}/${FILE_NAME:-${INPUT_FILE_BASENAME}}"
+fi
+if [ -b "${OUTPUT_FILE}" ]; then
+  OUTPUT_SIZE=$(blockdev --getsize64 "${OUTPUT_FILE}") || exit 1
+  if [ "${OUTPUT_SIZE}" -lt "${INPUT_SIZE}" ]; then
+    echo "Error: target device ${OUTPUT_FILE} (${OUTPUT_SIZE} bytes) is smaller than the backup (${INPUT_SIZE} bytes)." >&2
+    exit 1
+  fi
+elif [[ -e "${OUTPUT_FILE}" && ! -f "${OUTPUT_FILE}" ]] || [[ -L "${OUTPUT_FILE}" && ! -e "${OUTPUT_FILE}" ]]; then
+  echo "Error: unsupported restore target: ${OUTPUT_FILE}" >&2
   exit 1
 fi
-
-if [ -e "${OUTPUT}" ]; then
-  # Determine the type of the output
-  OUTPUT_FILE_TYPE=$(file -Lb -- "${OUTPUT}")
-  # Use the appropriate command to determine destination types and sizes
-  case "$OUTPUT_FILE_TYPE" in
-    # Wenn OUTPUT_FILE ein Blockdevice ist, prüfen, ob OUTPUT_FILE groß genug ist.
-    "block special"*)
-      OUTPUT_SIZE=$(blockdev --getsize64 "${OUTPUT}")
-      if [ "$INPUT_SIZE" -gt "$OUTPUT_SIZE" ]; then
-        echo "Fehler: Die Eingabegröße ($INPUT_SIZE) ist größer als die Ausgabegröße ($OUTPUT_SIZE)."
-        exit 1
-      fi
-      OUTPUT_FILE="$OUTPUT"
-      ;;
-    # Wenn OUTPUT ein Verzeichnis ist, prüfen, ob genügend freier Speicherplatz vorhanden ist.
-    directory)
-      AVAILABLE_SPACE=$(df -B 1 "$OUTPUT" | awk 'NR==2{print $4}')
-      if [ ! "$AVAILABLE_SPACE" -ge "$INPUT_SIZE" ]; then
-        echo "Fehler: Nicht genügend Speicherplatz vorhanden für $INPUT_FILE_BASENAME in $OUTPUT ."
-        exit 1
-      fi
-      # Basename aus den Metadaten (FILE_NAME); Fallback: Basisname von -i
-      OUTPUT_FILE="$OUTPUT/${FILE_NAME:-$INPUT_FILE_BASENAME}"
-      ;;
-    # Wenn OUTPUT eine Datei ist (die bereits exitiert), prüfen, ob genügend freier Speicherplatz vorhanden ist.
-    *)
-      OUTPUT_DIR=$(dirname -- "$OUTPUT")
-      OUTPUT_FILE="$OUTPUT"
-      AVAILABLE_SPACE=$(df -B 1 "$OUTPUT_DIR" | awk 'NR==2{print $4}')
-      if [ ! "$AVAILABLE_SPACE" -ge "$INPUT_SIZE" ]; then
-        echo "Fehler: Nicht genügend Speicherplatz vorhanden für $INPUT_FILE_BASENAME in $OUTPUT_DIR ."
-        exit 1
-      fi
-      ;;
-  esac
-else
-  # Wenn OUTPUT eine Datei ist (die nicht exitiert), prüfen, ob genügend freier Speicherplatz vorhanden ist.
-  OUTPUT_DIR=$(dirname -- "$OUTPUT")
-  OUTPUT_FILE="$OUTPUT"
-  AVAILABLE_SPACE=$(df -B 1 "$OUTPUT_DIR" | awk 'NR==2{print $4}')
-    if [ ! "$AVAILABLE_SPACE" -ge "$INPUT_SIZE" ]; then
-      echo "Fehler: Nicht genügend Speicherplatz vorhanden für $INPUT_FILE_BASENAME in $OUTPUT_DIR ."
-      exit 1
-    fi
-  if [ -w "$OUTPUT_DIR" ]; then
-    : # Create the target only after confirmation and validation.
-  else
-    echo "Fehler: Kein Schreibzugriff auf das Verzeichnis $OUTPUT_DIR vorhanden."
-    exit 1
-  fi
-
-fi
-
-# Resolve the final destination, including symlinks, before preallocation.
-if [ -e "${OUTPUT_FILE}" ]; then
-  if [ ! -f "${OUTPUT_FILE}" ] && [ ! -b "${OUTPUT_FILE}" ]; then
-    echo "Error: unsupported restore target: ${OUTPUT_FILE}" >&2
-    exit 1
-  fi
-  OUTPUT_FILE_TYPE=$(file -Lb -- "${OUTPUT_FILE}") || exit 1
-  if [ -b "${OUTPUT_FILE}" ]; then
-    OUTPUT_SIZE=$(blockdev --getsize64 "${OUTPUT_FILE}") || exit 1
-    if [ "${OUTPUT_SIZE}" -lt "${INPUT_SIZE}" ]; then
-      echo "Error: target device ${OUTPUT_FILE} (${OUTPUT_SIZE} bytes) is smaller than the backup (${INPUT_SIZE} bytes)." >&2
-      exit 1
-    fi
-  fi
-fi
 if [ "${REMOTE}" -ne 1 ]; then
-  for part_file in "${METADATA_FILE}" "${INPUT_FILES}"*.part "${INPUT_FILES}"*.gz "${INPUT_FILES}"*.sha256; do
+  for part_file in "${METADATA_FILE}" "${INPUT_FILES}"*.part "${INPUT_FILES}"*.gz "${INPUT_FILES}"*.sha256 "${METADATA_FILE}.old"; do
     if [ "${OUTPUT_FILE}" -ef "${part_file}" ]; then
       echo "Error: restore target aliases the backup: ${part_file}" >&2
       exit 1
@@ -614,7 +555,7 @@ elif [ ! -w "$(dirname -- "$OUTPUT_FILE")" ]; then
   exit 1
 fi
 
-echo "Nachfolgend werden die geteilten Dateien unter $INPUT_PATH/$INPUT_FILE_BASENAME nach $OUTPUT_FILE geschrieben."
+echo "Nachfolgend werden die geteilten Dateien unter ${INPUT} nach $OUTPUT_FILE geschrieben."
 if [ "$ASSUME_YES" -eq 1 ]; then
   echo "Sicherheitsabfrage übersprungen (-y). Beginning to restore ..."
   restore_split_image
@@ -643,18 +584,6 @@ else
   done
 fi
 
-#if [[ "$INPUT_FILE_TYPE" == "block special"* ]] && [[ "$OUTPUT_FILE_TYPE" == "block special"* ]]; then
-#  echo "Beginning to restore ..."
-#  restore_split_image
-#else
-#  echo "Input File Type ($INPUT_FILE_TYPE) stimmt nicht mit Output File Type ($OUTPUT_FILE_TYPE) überein."
-#fi
-#if [[ "$INPUT_FILE_TYPE" != "block special"* ]] && [[ "$OUTPUT_FILE_TYPE" != "block special"* ]]; then
-#  echo "Beginning to restore ..."
-#  restore_split_image
-#else
-#  echo "Input File Type ($INPUT_FILE_TYPE) stimmt nicht mit Output File Type ($OUTPUT_FILE_TYPE) überein."
-#fi
 wait_for_jobs
 
 if [ $REMOTE -eq 1 ]; then

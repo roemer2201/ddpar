@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Compare segmented backups or clones against their source or destination.
-# Version: 1.0.2 (2026-10-17)
+# Version: 1.0.3 (2026-11-19)
 # Flow: parse and validate inputs; hash each segment; report every job's status.
 
 # Fehler in dd-/sha256sum-Pipelines sollen den Exit-Code der Pipeline
@@ -145,27 +145,6 @@ function remote_seg_hash {
   execute_remote_command "dd if=$(shell_quote "${f}") bs=$BLOCKSIZEBYTES iflag=fullblock,count_bytes,skip_bytes count=$(part_bytes "$idx") skip=$start status=none | sha256sum" | cut -d' ' -f1
 }
 
-function remote_part_hash {
-  # $1 = Segment-Index. Liefert den SHA256 der Rohdaten des Segments, das auf
-  # dem Remote-Host als Teil-Datei liegt.
-  # - unkomprimiert: sha256sum läuft direkt auf dem Remote-Host, es gehen nur
-  #   der Hash über die Leitung
-  # - komprimiert: die .gz-Datei wird über SSH geholt und LOKAL ausgepackt
-  #   (local decompression), der Remote-Host benötigt dafür kein gzip
-  # - komprimiert mit -r c: zcat und sha256sum laufen auf dem Remote-Host
-  #   (remote decompression), auch hier geht nur der Hash über die Leitung
-  local idx=$1
-  if [ -n "$COMPRESSION" ]; then
-    if [ "$REMOTE_MODE" = "c" ]; then
-      execute_remote_command "zcat $(shell_quote "${BASE_FILES}${idx}.gz") | sha256sum" | cut -d' ' -f1
-    else
-      execute_remote_command "cat -- $(shell_quote "${BASE_FILES}${idx}.gz")" | zcat | sha256sum | cut -d' ' -f1
-    fi
-  else
-    execute_remote_command "sha256sum -- $(shell_quote "${BASE_FILES}${idx}.part")" | cut -d' ' -f1
-  fi
-}
-
 function require_sha256_files {
   # Prüft vorab, ob das Backup mit Checksummen-Dateien (-s) erstellt wurde.
   # Ohne diese Prüfung liefe sha256sum -c gegen fehlende Dateien und
@@ -188,18 +167,19 @@ function check_backup_pair {
     throttle_remote_jobs "${i}"
     (
       local h_bak h_local expected part_file
+      part_file="${BASE_FILES}${i}.part"
+      [ -n "${COMPRESSION}" ] && part_file="${BASE_FILES}${i}.gz"
       if [ "${REMOTE}" -eq 1 ]; then
-        h_bak=$(remote_part_hash "${i}") || exit 1
+        expected=$(ddpar_remote_expected_checksum "${BASE_FILES}${i}.sha256") || exit 1
+        h_bak=$(ddpar_remote_part_hash "${part_file}") || exit 1
       else
-        part_file="${BASE_FILES}${i}.part"
-        [ -n "${COMPRESSION}" ] && part_file="${BASE_FILES}${i}.gz"
         ddpar_verify_part "${part_file}" "$(part_bytes "${i}")" || exit 1
         expected=$(ddpar_checksum "${BASE_FILES}${i}.sha256") || exit 1
         h_bak=$(ddpar_part_stream "${part_file}" | sha256sum | cut -d' ' -f1) || exit 1
-        if [ "${h_bak}" != "${expected}" ]; then
-          echo "Segment ${i}: FAILED (backup checksum mismatch)" >&2
-          exit 1
-        fi
+      fi
+      if [[ -n "${expected}" && "${h_bak}" != "${expected}" ]]; then
+        echo "Segment ${i}: FAILED (backup checksum mismatch)" >&2
+        exit 1
       fi
       h_local=$(local_seg_hash "${local_file}" "${i}") || exit 1
       if [ "${h_bak}" != "${h_local}" ]; then
@@ -322,18 +302,9 @@ if [ "$#" -ne 0 ]; then
   exit 2
 fi
 
-# Basis-Pfad auflösen: bei Remote nicht via realpath (Pfad liegt auf dem Remote-Host)
-if [ -n "$BASE_ARG" ]; then
-  if [ $REMOTE -eq 1 ]; then
-    BASE_PATH=$(dirname -- "$BASE_ARG")
-    BASE_FILE_NAME=$(basename -- "$BASE_ARG")
-  else
-    BASE_PATH=$(dirname -- "$(realpath -- "${BASE_ARG}")")
-    BASE_FILE_NAME=$(basename -- "$(realpath -- "${BASE_ARG}")")
-  fi
-  echo "Set BASE_PATH=${BASE_PATH}"
-  echo "Set BASE_FILE_NAME=${BASE_FILE_NAME}"
-fi
+# A backup base is a prefix. Resolving it with realpath may follow an
+# unrelated symlink sharing that name and select an entirely different backup.
+BASE_PATH=${BASE_ARG:-}
 
 # Bei Remote-Check früh die SSH-Verbindung aufbauen
 if [ $REMOTE -eq 1 ]; then
@@ -367,22 +338,16 @@ fi
 
 # Create spinoff variables
 if [ -n "${BASE_PATH}" ]; then
-  BASE_FILES="${BASE_PATH}/${BASE_FILE_NAME}-"
+  BASE_FILES="${BASE_PATH}-"
   METADATA_FILE="${BASE_FILES}metadata.txt"
 
   # Get parameters from metadata file (lokal oder remote)
   if [ $REMOTE -eq 1 ]; then
-    META_SRC=$(mktemp)
-    execute_remote_command "cat -- $(shell_quote "${METADATA_FILE}")" > "$META_SRC" 2>/dev/null
-    if [ ! -s "$META_SRC" ]; then
-      echo "Die Metadatendatei $METADATA_FILE auf $REMOTE_HOST existiert nicht oder ist leer."
-      rm -f "$META_SRC"
-      close_ssh_connection
-      exit 1
-    fi
+    META_SRC=$(mktemp) || exit 1
+    ddpar_fetch_metadata "${METADATA_FILE}" "${META_SRC}" || exit 1
   else
     META_SRC="$METADATA_FILE"
-    if [ ! -r "$META_SRC" ]; then
+    if [ ! -f "$META_SRC" ] || [ ! -r "$META_SRC" ]; then
       echo "Fehler: Metadatendatei $META_SRC existiert nicht oder ist nicht lesbar."
       exit 1
     fi
@@ -395,12 +360,12 @@ if [ -n "${BASE_PATH}" ]; then
   # jeweils auspackenden Seite vorhanden sein.
   if [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ]; then
     if [ "$REMOTE_MODE" = "c" ]; then
-      if ! execute_remote_command "command -v zcat > /dev/null 2>&1"; then
+      if ! execute_remote_command "command -v gzip > /dev/null 2>&1"; then
         echo "Fehler: Das Backup ist komprimiert und -r c verlangt zcat (gzip) auf ${REMOTE_HOST}, dort ist es nicht verfügbar."
         close_ssh_connection
         exit 1
       fi
-    elif ! command -v zcat > /dev/null 2>&1; then
+    elif ! command -v gzip > /dev/null 2>&1; then
       echo "Fehler: Das Backup ist komprimiert, aber zcat (gzip) ist lokal nicht verfügbar."
       close_ssh_connection
       exit 1

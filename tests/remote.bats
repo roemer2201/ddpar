@@ -315,3 +315,18 @@ load helpers
   cmp "${TMP}/src.bin" "${TMP}/second/src.bin"
   [ "$(find /tmp -maxdepth 1 -type d -name 'ddpar-ssh.*' | sort)" = "${before}" ]
 }
+
+@test "Remote raw checks handle backslashes and restore validates copied sidecars" {
+  require_remote_support
+  printf source > "${TMP}/source"
+  mkdir "${TMP}/backup"
+  local base="${TMP}/backup/odd\\name"
+  run "${REPO_ROOT}/ddpar.sh" -i "${TMP}/source" -o "${TMP}/backup" -n 'odd\name' -m backup -s -j 1
+  [ "${status}" -eq 0 ]
+  run "${REPO_ROOT}/ddpar-check.sh" -s "${TMP}/source" -b "${base}" -R "${REMOTE_TEST_HOST}"
+  [ "${status}" -eq 0 ]
+  printf broken > "${base}-0.part"
+  run "${REPO_ROOT}/ddpar-restore.sh" -i "${base}" -o "${TMP}/dst" -y -R "${REMOTE_TEST_HOST}"
+  [ "${status}" -ne 0 ]
+  [ ! -e "${TMP}/dst" ]
+}
