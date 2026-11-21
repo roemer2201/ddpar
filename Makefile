@@ -5,7 +5,7 @@ SCRIPTS := ddpar.sh ddpar-restore.sh ddpar-check.sh ddpar-common.sh testing-dock
 help:
 	@echo "Verfügbare Targets:"
 	@echo "  make lint              ShellCheck auf alle .sh-Dateien ausführen (voller Report)"
-	@echo "  make lint-gate         ShellCheck nur auf echte Fehler prüfen (CI-Gate, severity=error)"
+	@echo "  make lint-gate         ShellCheck nur auf echte Fehler prüfen (severity=error)"
 	@echo "  make test              bats-Testsuite ausführen (Integrationstests werden ohne"
 	@echo "                         root/SSH automatisch übersprungen)"
 	@echo "  make test-verbose      wie test, gibt Kommandos + Output live aus (DDPAR_VERBOSE=1)"
@@ -21,9 +21,7 @@ lint:
 		{ echo "shellcheck nicht gefunden. Installation: make install-deps"; exit 1; }
 	shellcheck -x $(SCRIPTS)
 
-# Build-relevantes Gate: nur echte Fehler (severity=error) lassen die CI scheitern.
-# Schwelle kann später auf "warning"/"style" verschärft werden, sobald die im
-# vollen Report (make lint) gelisteten Punkte abgearbeitet sind.
+# Optional reduced report. CI and package builds use the full lint target.
 lint-gate:
 	@command -v shellcheck > /dev/null 2>&1 || \
 		{ echo "shellcheck nicht gefunden. Installation: make install-deps"; exit 1; }

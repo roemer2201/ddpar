@@ -85,4 +85,21 @@ jobs:
 
       # losetup braucht root, ssh-zu-localhost ebenfalls als root -> via sudo.
       - name: Run integration tests (block devices + remote) as root
-        run: sudo --preserve-env=PATH bats tests/blockdev.bats tests/remote.bats
+        shell: bash
+        run: |
+          sudo --preserve-env=PATH bats --formatter tap tests/blockdev.bats tests/remote.bats | tee "${RUNNER_TEMP}/integration.tap"
+          if grep -Eq '^ok [0-9]+ .* # skip' "${RUNNER_TEMP}/integration.tap"; then
+            echo "A required integration test was skipped" >&2
+            exit 1
+          fi
+
+  docker:
+    name: Docker two-host round trips
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise the source and target containers
+        env:
+          TEST_SIZE_MB: 4
+        run: ./testing-docker/run-remote-tests.sh

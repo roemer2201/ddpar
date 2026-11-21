@@ -5,7 +5,7 @@
 #   2. Select value completion from the command and local/remote context.
 #   3. Return candidates without executing ddpar or contacting remote hosts.
 # Usage: source completions/ddpar (after loading bash-completion >= 2.1).
-# Version: 1.0.1 (2026-10-17)
+# Version: 1.0.2 (2026-11-19)
 
 # Offer directories and backup bases, not individual part/checksum files.
 # Metadata is only used as a filename marker; its contents are never executed.
@@ -15,7 +15,7 @@ _ddpar_backup_bases()
     local -a candidates
     # Let bash-completion handle Readline quoting, escaped spaces and tildes.
     # Direct compgen calls miss quoted backup paths in a real Tab invocation.
-    _filedir txt
+    "${filedir}" txt
     candidates=("${COMPREPLY[@]}")
     COMPREPLY=()
     for candidate in "${candidates[@]}"; do
@@ -48,7 +48,15 @@ _ddpar()
 {
     local cur prev words cword
     # Keep = and : inside the word so paths like a=b.img or db-12:00.img match.
-    _init_completion -n =: || return
+    # bash-completion 2.12 introduced new helpers. Minimal installations
+    # can omit the optional compatibility definitions for the old names.
+    local init=_init_completion filedir=_filedir known_hosts=_known_hosts_real
+    if declare -F _comp_initialize >/dev/null; then
+        init=_comp_initialize
+        filedir=_comp_compgen_filedir
+        known_hosts=_comp_compgen_known_hosts
+    fi
+    "${init}" -n =: || return
     local full_cur="${cur}"
     local tool="${words[0]##*/}"
     tool="${tool%.sh}"
@@ -159,8 +167,8 @@ _ddpar()
             ;;
         R)
             # Use local SSH aliases/known_hosts, retaining an optional user@.
-            local COMP_KNOWN_HOSTS_WITH_AVAHI=''
-            _known_hosts_real -a "${cur}"
+            local COMP_KNOWN_HOSTS_WITH_AVAHI='' BASH_COMPLETION_KNOWN_HOSTS_WITH_AVAHI=''
+            "${known_hosts}" -a "${cur}"
             ;;
         j) COMPREPLY=($(compgen -W '1 2 4 8 16 32 64' -- "${cur}")) ;;
         B) COMPREPLY=($(compgen -W '512 4096 65536 1048576 4194304' -- "${cur}")) ;;
@@ -175,20 +183,20 @@ _ddpar()
             if [[ "${tool}" == ddpar-restore ]]; then
                 [[ "${remote}" == 1 ]] || _ddpar_backup_bases
             else
-                _filedir
+                "${filedir}"
             fi
             ;;
         o)
             if [[ "${tool}" == ddpar && "${remote}" == 1 ]]; then
                 : # Remote paths must be entered manually; never open SSH on Tab.
             elif [[ "${tool}" == ddpar && "${mode}" == backup ]]; then
-                _filedir -d
+                "${filedir}" -d
             else
-                _filedir
+                "${filedir}"
             fi
             ;;
-        s) _filedir ;;
-        d) [[ "${remote}" == 1 && "${backup}" == 0 ]] || _filedir ;;
+        s) "${filedir}" ;;
+        d) [[ "${remote}" == 1 && "${backup}" == 0 ]] || "${filedir}" ;;
         n) : ;; # Arbitrary backup basename, not a pathname or enum.
         '') COMPREPLY=($(compgen -W "${options}" -- "${cur}")) ;;
     esac

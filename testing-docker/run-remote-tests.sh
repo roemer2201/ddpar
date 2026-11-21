@@ -3,15 +3,16 @@
 # run-remote-tests.sh - Automatisierter Remote-Test im Zwei-Container-Harness.
 #
 # Baut/startet die Container "source" und "target", führt die Remote-Szenarien
-# (SSH + netcat, Modus n) von source -> target aus und prüft die Integrität per
+# (SSH + netcat, Modi n und c) von source -> target aus und prüft die Integrität per
 # SHA256. Liefert einen Exitcode (0 = alles bestanden, 1 = mindestens ein Fehler).
 #
-# Dies ist ein MANUELLES Werkzeug (nicht Teil der GitHub-Actions-CI), gedacht zum
-# Nachtesten nach Code-Änderungen an den ddpar-Skripten. Die Skripte werden
-# read-only aus dem Repo-Root in die Container gemountet, ein Rebuild ist nach
-# Skriptänderungen also nicht nötig (--no-build nutzen).
+# Der GitHub-Actions-Job "Docker two-host round trips" führt dieses Skript mit
+# einer 4-MiB-Datei aus; manuell dient es zum Nachtesten nach Code-Änderungen an
+# den ddpar-Skripten. Die Skripte werden read-only aus dem Repo-Root in die
+# Container gemountet, ein Rebuild ist nach Skriptänderungen also nicht nötig
+# (--no-build nutzen).
 #
-# Version: 1.0.1 (2026-10-17)
+# Version: 1.0.2 (2026-11-19)
 #
 # Verwendung:
 #   ./run-remote-tests.sh [--no-build] [--keep] [--verbose] [-h]
@@ -57,7 +58,7 @@ vshow() {
   fi
 }
 
-# shellcheck disable=SC2317  # Funktionsrumpf wird via trap aufgerufen
+# shellcheck disable=SC2317,SC2329  # Called indirectly by the EXIT trap.
 cleanup() {
   if [ "$KEEP" -eq 1 ]; then
     info "Container laufen weiter (--keep). Aufräumen mit: $DC down -v"
@@ -71,6 +72,19 @@ trap cleanup EXIT
 # Befehl im jeweiligen Container ausführen (Login-Shell für vollständigen PATH).
 src() { $DC exec -T source bash -lc "$1"; }
 tgt() { $DC exec -T target bash -lc "$1"; }
+
+# A single healthy segment can print OK before another worker fails.
+# The checker's exit status covers all segments and SSH/read failures.
+check_remote_backup() {
+  local base="${1}" mode="${2}" output
+  if output=$(src "./ddpar-check.sh -s ${SRC_IMG} -b ${base} -r ${mode} -R root@target" 2>&1); then
+    vshow "${output}"
+    pass "Remote check: ${base} (mode ${mode})"
+  else
+    fail "Remote check: ${base} (mode ${mode})"
+    printf '%s\n' "${output}" | tail -15
+  fi
+}
 
 # --- Container bauen/starten ---
 
@@ -123,8 +137,6 @@ info "Quelle: $SRC_IMG  sha256=$SRC_HASH"
 info "Szenario 1: Remote-Clone (Datei) source -> target"
 if out="$(src "./ddpar.sh -i $SRC_IMG -o /clone_dest -m clone -r n -R root@target" 2>&1)"; then
   vshow "$out"
-  tgt 'sync' || true
-  sleep 1
   DST_HASH="$(tgt 'sha256sum /clone_dest/source.img 2>/dev/null' | awk '{print $1}')"
   if [ -n "$DST_HASH" ] && [ "$SRC_HASH" = "$DST_HASH" ]; then
     pass "Remote-Clone bitgenau (sha256=$DST_HASH)"
@@ -150,7 +162,6 @@ if out="$(src "./ddpar.sh -i $SRC_IMG -o /backup -m backup -r n -R root@target" 
 
   if out2="$(src "./ddpar-restore.sh -i /backup/source.img -o /restore/source.img -r n -R root@target -y" 2>&1)"; then
     vshow "$out2"
-    sleep 1
     RES_HASH="$(src 'sha256sum /restore/source.img 2>/dev/null' | awk '{print $1}')"
     if [ -n "$RES_HASH" ] && [ "$SRC_HASH" = "$RES_HASH" ]; then
       pass "Remote-Restore bitgenau (sha256=$RES_HASH)"
@@ -171,15 +182,7 @@ fi
 # --- Szenario 3: Remote-Check (lokale Quelle <-> Remote-Backup) ---
 
 info "Szenario 3: Remote-Check (Quelle <-> Remote-Backup auf target)"
-check_out="$(src "./ddpar-check.sh -s $SRC_IMG -b /backup/source.img -r n -R root@target" 2>&1 || true)"
-vshow "$check_out"
-if echo "$check_out" | grep -q "OK" && ! echo "$check_out" | grep -q "FAILED"; then
-  pass "Remote-Check bestätigt Übereinstimmung"
-else
-  fail "Remote-Check meldet keine Übereinstimmung"
-  echo "$check_out" | tail -15 | sed 's/^/    /'
-fi
-
+check_remote_backup /backup/source.img n
 # --- Szenario 4: Remote-Backup/-Restore/-Check mit lokaler [De]Kompression ---
 
 info "Szenario 4: Remote-Backup komprimiert (-c, Kompression lokal auf source)"
@@ -198,7 +201,6 @@ if out="$(src "./ddpar.sh -i $SRC_IMG -o /backup_gz -m backup -c -r n -R root@ta
 
   if out2="$(src "./ddpar-restore.sh -i /backup_gz/source.img -o /restore/source-gz.img -r n -R root@target -y" 2>&1)"; then
     vshow "$out2"
-    sleep 1
     RES_HASH="$(src 'sha256sum /restore/source-gz.img 2>/dev/null' | awk '{print $1}')"
     if [ -n "$RES_HASH" ] && [ "$SRC_HASH" = "$RES_HASH" ]; then
       pass "Remote-Restore (komprimiert, lokale Dekompression) bitgenau (sha256=$RES_HASH)"
@@ -211,14 +213,7 @@ if out="$(src "./ddpar.sh -i $SRC_IMG -o /backup_gz -m backup -c -r n -R root@ta
     echo "$out2" | tail -15 | sed 's/^/    /'
   fi
 
-  check_gz_out="$(src "./ddpar-check.sh -s $SRC_IMG -b /backup_gz/source.img -r n -R root@target" 2>&1 || true)"
-  vshow "$check_gz_out"
-  if echo "$check_gz_out" | grep -q "OK" && ! echo "$check_gz_out" | grep -q "MISMATCH"; then
-    pass "Remote-Check des komprimierten Backups bestätigt Übereinstimmung"
-  else
-    fail "Remote-Check des komprimierten Backups meldet keine Übereinstimmung"
-    echo "$check_gz_out" | tail -15 | sed 's/^/    /'
-  fi
+  check_remote_backup /backup_gz/source.img n
 else
   vshow "$out"
   fail "Remote-Backup-Kommando (-c) schlug fehl"
@@ -243,7 +238,6 @@ if out="$(src "./ddpar.sh -i $SRC_IMG -o /backup_rc -m backup -c -r c -R root@ta
 
   if out2="$(src "./ddpar-restore.sh -i /backup_rc/source.img -o /restore/source-rc.img -r c -R root@target -y" 2>&1)"; then
     vshow "$out2"
-    sleep 1
     RES_HASH="$(src 'sha256sum /restore/source-rc.img 2>/dev/null' | awk '{print $1}')"
     if [ -n "$RES_HASH" ] && [ "$SRC_HASH" = "$RES_HASH" ]; then
       pass "Remote-Restore (remote decompression) bitgenau (sha256=$RES_HASH)"
@@ -256,21 +250,12 @@ if out="$(src "./ddpar.sh -i $SRC_IMG -o /backup_rc -m backup -c -r c -R root@ta
     echo "$out2" | tail -15 | sed 's/^/    /'
   fi
 
-  check_rc_out="$(src "./ddpar-check.sh -s $SRC_IMG -b /backup_rc/source.img -r c -R root@target" 2>&1 || true)"
-  vshow "$check_rc_out"
-  if echo "$check_rc_out" | grep -q "OK" && ! echo "$check_rc_out" | grep -q "MISMATCH"; then
-    pass "Remote-Check (-r c, Hashing auf target) bestätigt Übereinstimmung"
-  else
-    fail "Remote-Check (-r c) meldet keine Übereinstimmung"
-    echo "$check_rc_out" | tail -15 | sed 's/^/    /'
-  fi
-
+  check_remote_backup /backup_rc/source.img c
   # Die .gz-Teile sind unabhaengig davon, wo komprimiert wurde: Restore mit
   # lokaler Dekompression (-r n) muss dieselben Daten liefern.
   src 'rm -f /restore/source-rc-n.img 2>/dev/null || true'
   if out3="$(src "./ddpar-restore.sh -i /backup_rc/source.img -o /restore/source-rc-n.img -r n -R root@target -y" 2>&1)"; then
     vshow "$out3"
-    sleep 1
     RES_HASH="$(src 'sha256sum /restore/source-rc-n.img 2>/dev/null' | awk '{print $1}')"
     if [ -n "$RES_HASH" ] && [ "$SRC_HASH" = "$RES_HASH" ]; then
       pass "Mit -r c erzeugtes Backup ist auch mit -r n wiederherstellbar"
@@ -295,8 +280,6 @@ src 'ssh -o StrictHostKeyChecking=no root@target "mkdir -p /clone_dest_gz; rm -f
 
 if out="$(src "./ddpar.sh -i $SRC_IMG -o /clone_dest_gz -m clone -c -r c -R root@target" 2>&1)"; then
   vshow "$out"
-  tgt 'sync' || true
-  sleep 1
   DST_HASH="$(tgt 'sha256sum /clone_dest_gz/source.img 2>/dev/null' | awk '{print $1}')"
   if [ -n "$DST_HASH" ] && [ "$SRC_HASH" = "$DST_HASH" ]; then
     pass "Remote-Clone (-r c -c) bitgenau (sha256=$DST_HASH)"

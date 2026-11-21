@@ -1,555 +1,87 @@
-# TESTING
+# ddpar testen
 
-Dieses Dokument enthält Beispiel-Kommandos zum manuellen Testen aller implementierten Funktionen von ddpar.
+## Automatisierte Suite
 
-> **Automatisierte Tests:** Es gibt eine bats-Suite unter [`tests/`](tests/), die
-> zusammen mit ShellCheck in der CI läuft (`.github/workflows/ci.yml`):
-> CLI-Verhalten und Datei-`backup → check → restore`-Roundtrip (schneller Job) sowie
-> Blockgerät- (Loop-Devices) und Remote-Tests (SSH+netcat, Modi `n` und `c`) im
-> Integration-Job. Lokal: `make check` bzw. `make test-integration` (root/SSH nötig).
-> Details in [`tests/README.md`](tests/README.md). Die hier dokumentierten Szenarien
-> (echtes Zwei-Host-Remote, Blockgeräte remote, Modus `l`) ergänzen das über das
-> Docker-Harness unter [`testing-docker/`](testing-docker/).
-
----
-
-## Voraussetzungen
-
-### Variablen definieren
-
-Die folgenden Variablen in der Shell setzen und in allen Kommandos verwenden:
+Im Repository-Root ausführen. Die lokalen Tests verwenden temporäre Dateien.
 
 ```bash
-# Lokal – Quelllaufwerk (Block Device)
-SOURCE_DEV=/dev/sdb
-
-# Lokal – Ziellaufwerk für Clone (Block Device, mindestens so groß wie SOURCE_DEV)
-DEST_DEV=/dev/sdc
-
-# Lokal – Testdatei (wird unter "Testdaten erstellen" angelegt)
-SOURCE_FILE=/tmp/ddpar_test.img
-
-# Lokal – Zielverzeichnis für File-Clone
-DEST_DIR=/tmp/ddpar_clone_dest
-
-# Lokal – Backup-Verzeichnis
-BACKUP_DIR=/mnt/backup
-
-# Remote – SSH-Verbindung
-REMOTE_HOST=user@192.168.1.100
-
-# Remote – Ziellaufwerk auf dem Remote-Host (Block Device)
-REMOTE_DEST_DEV=/dev/sdb
-
-# Remote – Zielverzeichnis für File-Clone auf dem Remote-Host
-REMOTE_DEST_DIR=/tmp/ddpar_clone_dest
-
-# Remote – Backup-Verzeichnis auf dem Remote-Host
-REMOTE_BACKUP_DIR=/tmp/ddpar_backup
+make install-deps
+make check
 ```
 
-### Testdaten erstellen
+| Tests | Prüfumfang |
+|---|---|
+| `tests/cli.bats` | Hilfe, Pflichtargumente und Fehlerstatus |
+| `tests/roundtrip.bats`, `tests/integrity.bats` | Bytegenauer Clone und Restore, gzip, Prüfsummen, ältere Metadaten, Abbruch, Alias- und Überschreibschutz |
+| `tests/completion.bats`, `tests/completion_readline.py` | Befehlsnamen, lokale und entfernte Argumente, echte Tab-Eingaben in einer interaktiven Bash |
+| `tests/blockdev.bats` | Clone, Backup, Restore und Vergleich auf eigens angelegten Loop-Geräten |
+| `tests/remote.bats` | SSH und netcat, beide Kompressionsmodi, beschädigte Teile, Fehlerstatus und parallele Verbindungen |
+| `tests/harness.bats` | Fehlerweitergabe des Docker-Testskripts bei teilweise erfolgreichen Segmentvergleichen |
 
-Eine 64 MiB große Testdatei anlegen (beliebige Größen sind möglich, ein nicht
-verteilbarer Rest wird vom letzten Teil übertragen):
+`make test-verbose` zeigt Befehle und Ausgaben. `make test-log` schreibt sie
+nach `/tmp/ddpar-test.log`. `make lint` führt ShellCheck einschließlich des
+gemeinsamen Skripts, der Completion und der Docker-Skripte aus.
+
+## Integration
+
+`make test-integration` führt die Blockgeräte- und Remote-Suites aus. Die
+Loop-Tests benötigen root und nutzbare Loop-Geräte. Die SSH-Tests verwenden
+standardmäßig einen passwortlosen Zugang zu `localhost`, OpenBSD-netcat und
+`ss`. Bei einem über `DDPAR_REMOTE_TEST_HOST` gesetzten Host müssen die lokalen
+temporären Testverzeichnisse **unter denselben Pfaden** auf beiden Seiten
+zugänglich sein. Für getrennte Dateisysteme gibt es das Zwei-Container-Harness.
 
 ```bash
-dd if=/dev/urandom of=$SOURCE_FILE bs=1M count=64
+./testing-docker/run-remote-tests.sh
 ```
 
-Zielverzeichnisse anlegen:
+Lokal überspringt Bats fehlende Integrationsvoraussetzungen. Der Integrationstest
+in GitHub Actions verlangt, dass alle Fälle laufen. Dort werden außerdem das
+Debian-Paket, ShellCheck, die lokale Suite und der echte Zwei-Container-Aufbau
+geprüft. [Docker-Testumgebung](testing-docker/README.md)
+
+## Manueller Dateitest
+
+Diese Bash-Befehle prüfen denselben Inhalt als Quelle, Backup, wiederhergestellte
+Datei und Clone. Die ungerade Länge erzwingt ein ungleich großes letztes Segment.
 
 ```bash
-mkdir -p $DEST_DIR
-mkdir -p $BACKUP_DIR
+(
+  set -eu
+  workdir=$(mktemp -d)
+  trap 'rm -rf -- "${workdir}"' EXIT
+  mkdir "${workdir}/backup"
+  head -c 1048593 /dev/urandom > "${workdir}/source.img"
+
+  ./ddpar.sh -i "${workdir}/source.img" -o "${workdir}/backup" -m backup -c -s -j 3 -b 4096
+  base="${workdir}/backup/source.img"
+  ./ddpar-check.sh -s "${workdir}/source.img" -b "${base}"
+  ./ddpar-restore.sh -i "${base}" -o "${workdir}/restored.img" -y
+  ./ddpar-check.sh -b "${base}" -d "${workdir}/restored.img"
+  cmp "${workdir}/source.img" "${workdir}/restored.img"
+
+  ./ddpar.sh -i "${workdir}/source.img" -o "${workdir}/clone.img"
+  ./ddpar-check.sh -s "${workdir}/source.img" -d "${workdir}/clone.img"
+)
 ```
 
----
-
-## 1. Lokale Tests – unkomprimiert
-
-### 1.1 Clone – Block Device
-
-```bash
-sudo ./ddpar.sh -i $SOURCE_DEV -o $DEST_DEV -m clone
-```
-
-> **Hinweis:** `$DEST_DEV` muss mindestens so groß sein wie `$SOURCE_DEV`.
-
-### 1.2 Clone – Datei
-
-```bash
-./ddpar.sh -i $SOURCE_FILE -o $DEST_DIR -m clone
-```
-
-> **Hinweis:** Der Output `-o` muss ein vorhandenes Verzeichnis sein. Das geklonte
-> File wird dort als `ddpar_test.img` abgelegt.
-
-### 1.3 Backup – Block Device
-
-```bash
-sudo ./ddpar.sh -i $SOURCE_DEV -o $BACKUP_DIR -m backup
-```
-
-Erzeugte Dateien: `$BACKUP_DIR/sdb-0.part` … `sdb-3.part` + `sdb-metadata.txt`
-
-### 1.4 Backup – Datei
-
-```bash
-./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup
-```
-
-Erzeugte Dateien: `$BACKUP_DIR/ddpar_test.img-0.part` … + `ddpar_test.img-metadata.txt`
-
-### 1.5 Restore – Block Device
-
-```bash
-sudo ./ddpar-restore.sh -i $BACKUP_DIR/sdb -o $DEST_DEV
-```
-
-> **Hinweis:** Erfordert ein vorher erstelltes Backup aus Test 1.3.
-> Der Parameter `-i` ist der Basispfad **ohne** das abschließende `-`.
-
-### 1.6 Restore – Datei
-
-```bash
-./ddpar-restore.sh -i $BACKUP_DIR/ddpar_test.img -o $DEST_DIR/ddpar_test.img
-```
-
-> **Hinweis:** Erfordert ein vorher erstelltes Backup aus Test 1.4.
-
----
-
-## 2. Lokale Tests – komprimiert (gzip)
-
-### 2.1 Backup – Block Device (gzip)
-
-```bash
-sudo ./ddpar.sh -i $SOURCE_DEV -o $BACKUP_DIR -m backup -c
-```
-
-Erzeugte Dateien: `$BACKUP_DIR/sdb-0.gz` … `sdb-3.gz` + `sdb-metadata.txt`
-
-### 2.2 Backup – Datei (gzip)
-
-```bash
-./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -c
-```
-
-### 2.3 Restore – Block Device (gzip)
-
-```bash
-sudo ./ddpar-restore.sh -i $BACKUP_DIR/sdb -o $DEST_DEV
-```
-
-> **Hinweis:** Erfordert ein vorher erstelltes komprimiertes Backup aus Test 2.1.
-> Das Skript erkennt die Komprimierung automatisch über die Metadaten.
-
-### 2.4 Restore – Datei (gzip)
-
-```bash
-./ddpar-restore.sh -i $BACKUP_DIR/ddpar_test.img -o $DEST_DIR/ddpar_test.img
-```
-
-> **Hinweis:** Erfordert ein vorher erstelltes komprimiertes Backup aus Test 2.2.
-
----
-
-## 3. Prüfung (ddpar-check.sh)
-
-> **Hinweis:** Die Tests 3.1 und 3.2 setzen ein vorhandenes Backup voraus.
-> Der Clone-Check ohne Backup-Metadaten folgt in Test 3.3.
-
-### 3.1 Quelle gegen Backup prüfen (Source ↔ Backup)
-
-Block Device:
-```bash
-sudo ./ddpar-check.sh -b $BACKUP_DIR/sdb -s $SOURCE_DEV
-```
-
-Datei:
-```bash
-./ddpar-check.sh -b $BACKUP_DIR/ddpar_test.img -s $SOURCE_FILE
-```
-
-### 3.2 Backup gegen Ziel prüfen (Backup ↔ Destination)
-
-Block Device:
-```bash
-sudo ./ddpar-check.sh -b $BACKUP_DIR/sdb -d $DEST_DEV
-```
-
-Datei:
-```bash
-./ddpar-check.sh -b $BACKUP_DIR/ddpar_test.img -d $DEST_DIR/ddpar_test.img
-```
-
-### 3.3 Clone prüfen (Source ↔ Destination, ohne Backup-Metadaten)
-
-Da beim Clone keine Metadatendatei existiert, müssen Jobs (und ggf.
-Blockgröße) wie beim Clone-Vorgang angegeben werden:
-
-Block Device:
-```bash
-sudo ./ddpar-check.sh -s $SOURCE_DEV -d $DEST_DEV -j 4
-```
-
-Datei:
-```bash
-./ddpar-check.sh -s $SOURCE_FILE -d $DEST_DIR/ddpar_test.img -j 4
-```
-
----
-
-## 4. Remote Tests – SSH + Netcat
-
-> **Voraussetzung:** SSH-Zugang zu `$REMOTE_HOST` muss eingerichtet sein
-> (passwortlos per Key oder interaktiv per Passwort).
-> `nc` (netcat) und `ss` müssen auf dem Remote-Host verfügbar sein.
-
-### 4.1 Remote Clone – Block Device, unkomprimiert (Modus n)
-
-Modus `n`: SSH-Verbindungsaufbau verschlüsselt, Dateiübertragung über Netcat unverschlüsselt.
-
-```bash
-sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r n -R $REMOTE_HOST
-```
-
-### 4.2 Remote Clone – Datei, unkomprimiert (Modus n)
-
-> **Abweichung:** `-o` ist hier ein Verzeichnis auf dem Remote-Host.
-
-```bash
-./ddpar.sh -i $SOURCE_FILE -o $REMOTE_DEST_DIR -m clone -r n -R $REMOTE_HOST
-```
-
-### 4.3 Remote Clone – Block Device, vollständig verschlüsselt (Modus l)
-
-Modus `l` ist nicht implementiert. Der folgende Aufruf muss mit Fehlerstatus
-abbrechen, ohne einen unverschlüsselten Transfer zu starten.
-
-```bash
-sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r l -R $REMOTE_HOST
-```
-
-### 4.4 Remote Clone – Block Device, lokale Kompression (Modus n + -c)
-
-> **Nicht möglich.** Ein Clone muss auf der Remote-Seite wieder dekomprimiert
-> werden; das kann nur Modus `c` (Test 4.5). Mit `-r n` wird `-c` im Clone-Modus
-> ignoriert, das Skript gibt eine Warnung aus.
-
-```bash
-sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -r n -c -R $REMOTE_HOST
-```
-
-> Erwartung: Warnung „Kompression (-c) ist im Clone-Modus nur mit Remote-Modus
-> 'c' (-r c) möglich“, danach unkomprimierter Clone.
-
-### 4.5 Remote Clone – Block Device, komprimierter Transfer (Modus c + -c)
-
-Lokal wird komprimiert, die Remote-Seite dekomprimiert vor dem Schreiben
-(*remote decompression*). Über netcat geht nur der komprimierte Strom.
-
-```bash
-sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_DEST_DEV -m clone -c -r c -R $REMOTE_HOST
-     ./ddpar.sh -i $SOURCE_FILE -o $REMOTE_DEST_DIR -m clone -c -r c -R $REMOTE_HOST
-```
-
-> **Voraussetzung:** `gzip` auf dem Remote-Host.
-> Erwartung: pro Teil `dd if=… | gzip -6 | nc <host> <PORT>` sowie auf dem
-> Remote-Host `nc -N -l <PORT> | gzip -dc | dd of=… seek=…`.
-> Prüfen wie beim unkomprimierten Clone (Test 4.12) — auf dem Ziel liegen
-> Rohdaten, keine `.gz`-Dateien.
-
-### 4.6 Remote Backup – Block Device, unkomprimiert (Modus n)
-
-Die Split-Teile werden per Netcat zum `$REMOTE_HOST` übertragen und dort als
-`*.part`-Dateien abgelegt. Die Übertragung ist hier unkomprimiert und ohne
-Prüfsumme (`-s` wird auf dem Remote-Pfad nicht angewendet, `-c` siehe Test 4.13).
-
-```bash
-sudo ./ddpar.sh -i $SOURCE_DEV -o $REMOTE_BACKUP_DIR -m backup -r n -R $REMOTE_HOST
-```
-
-> **Voraussetzung:** `$REMOTE_BACKUP_DIR` muss auf dem Remote-Host als Verzeichnis
-> existieren.
-> Erzeugte Dateien auf dem Remote-Host: `$REMOTE_BACKUP_DIR/sdb-0.part` …
-> `sdb-3.part` + `sdb-metadata.txt`.
-
-### 4.7 Remote Backup – Datei, unkomprimiert (Modus n)
-
-```bash
-./ddpar.sh -i $SOURCE_FILE -o $REMOTE_BACKUP_DIR -m backup -r n -R $REMOTE_HOST
-```
-
-> Erzeugte Dateien auf dem Remote-Host:
-> `$REMOTE_BACKUP_DIR/ddpar_test.img-0.part` … + `ddpar_test.img-metadata.txt`.
-
-#### Automatisierte Prüfung
-
-Für diesen Datenpfad `tests/remote.bats` mit einem erreichbaren SSH-Testhost
-oder das Zwei-Container-Harness verwenden. Ein Stub, der nur erfolgreichen
-Befehlsaufbau meldet, validiert weder die Daten noch deren Länge oder den
-Abschluss der Remote-Pipelines.
-
-### 4.8 Remote Restore – Block Device, unkomprimiert (Modus n)
-
-Die Backup-Teile liegen auf dem `$REMOTE_HOST`; das Zielgerät `-o` ist **lokal**.
-Der Remote-Host sendet die Teile per Netcat, lokal werden sie empfangen und
-geschrieben. Komprimierte Backups siehe Test 4.13 (Dekompression lokal).
-Der `-i`-Basispfad ist der Pfad **auf dem Remote-Host** ohne abschließendes `-`.
-
-```bash
-sudo ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/sdb -o $DEST_DEV -r n -R $REMOTE_HOST
-```
-
-> **Voraussetzung:** Ein vorher erstelltes Remote-Backup aus Test 4.6.
-> Die Metadaten werden automatisch vom `$REMOTE_HOST` gelesen.
-
-### 4.9 Remote Restore – Datei, unkomprimiert (Modus n)
-
-```bash
-./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/ddpar_test.img -o $DEST_DIR/ddpar_test.img -r n -R $REMOTE_HOST
-```
-
-> **Voraussetzung:** Ein vorher erstelltes Remote-Backup aus Test 4.7.
-
-#### Automatisierte Prüfung
-
-Für diesen Datenpfad `tests/remote.bats` mit einem erreichbaren SSH-Testhost
-oder das Zwei-Container-Harness verwenden. Ein Stub, der nur erfolgreichen
-Befehlsaufbau meldet, validiert weder die Daten noch deren Länge oder den
-Abschluss der Remote-Pipelines.
-
-### 4.10 Remote Check – Quelle gegen Remote-Backup (Source ↔ Backup)
-
-> **Hinweis:** Der Remote-Check überträgt **keine** Nutzdaten über netcat – bei
-> unkomprimierten Backups werden die SHA256-Hashes je Segment lokal bzw. per SSH
-> auf dem Remote-Host berechnet und nur verglichen. Bei komprimierten Backups
-> holt der Check die `.gz`-Teile über SSH und packt sie **lokal** aus
-> (local decompression, Test 4.13). Die `-b`-Seite liegt auf dem Remote-Host.
-
-```bash
-./ddpar-check.sh -s $SOURCE_FILE -b $REMOTE_BACKUP_DIR/ddpar_test.img -r n -R $REMOTE_HOST
-```
-
-> **Voraussetzung:** Remote-Backup aus Test 4.6/4.7.
-> Erwartung: `Segment N: OK (<hash>)` pro Segment, sonst `MISMATCH`.
-
-### 4.11 Remote Check – Remote-Backup gegen lokales Ziel (Backup ↔ Destination)
-
-```bash
-sudo ./ddpar-check.sh -b $REMOTE_BACKUP_DIR/sdb -d $DEST_DEV -r n -R $REMOTE_HOST
-```
-
-> **Voraussetzung:** Lokaler Remote-Restore aus Test 4.8 nach `$DEST_DEV`.
-
-### 4.12 Remote Check – Clone (Source ↔ Remote-Destination)
-
-Für einen Remote-Clone (Test 4.1/4.2): das geklonte Ziel liegt auf dem Remote-Host.
-
-```bash
-sudo ./ddpar-check.sh -s $SOURCE_DEV -d $REMOTE_DEST_DEV -r n -R $REMOTE_HOST -j 4 -B 1048576
-```
-
-> **Abweichung:** Ohne `-b` gibt es keine Metadaten; `-j`/`-B` müssen zum
-> ursprünglichen Clone-Aufruf passen.
-
-#### Automatisierte Prüfung
-
-Für diesen Datenpfad `tests/remote.bats` mit einem erreichbaren SSH-Testhost
-oder das Zwei-Container-Harness verwenden. Ein Stub, der nur erfolgreichen
-Befehlsaufbau meldet, validiert weder die Daten noch deren Länge oder den
-Abschluss der Remote-Pipelines.
-
-### 4.13 Remote mit lokaler [De]Kompression (Modus n + -c)
-
-> **Prinzip:** gzip/zcat laufen auf der **lokalen** Maschine. Über das Netz geht
-> nur der komprimierte Strom, die Remote-Seite schreibt bzw. liest die
-> `.gz`-Teile mit `dd` und benötigt **kein gzip**. Die Metadatendatei enthält
-> `COMPRESSION=1` und `COMPRESSION_LEVEL`, sodass Restore und Check den
-> komprimierten Pfad automatisch erkennen.
-
-#### 4.13.1 Remote Backup, komprimiert (Block Device und Datei)
-
-```bash
-sudo ./ddpar.sh -i $SOURCE_DEV  -o $REMOTE_BACKUP_DIR -m backup -c -r n -R $REMOTE_HOST
-     ./ddpar.sh -i $SOURCE_FILE -o $REMOTE_BACKUP_DIR -m backup -c -r n -R $REMOTE_HOST
-```
-
-> Erwartung: pro Teil eine Zeile
-> `dd if=… | gzip -6 | nc <host> <PORT>` sowie auf dem Remote-Host
-> `nc -N -l <PORT> | dd of=…-N.gz`.
-> Erzeugte Dateien auf dem Remote-Host: `$REMOTE_BACKUP_DIR/sdb-0.gz` …
-> `sdb-3.gz` + `sdb-metadata.txt` (mit `COMPRESSION=1`) — **keine** `.part`-Dateien.
-
-#### 4.13.2 Remote Restore aus komprimiertem Backup
-
-```bash
-sudo ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/sdb -o $DEST_DEV -r n -R $REMOTE_HOST
-     ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/ddpar_test.img -o $DEST_DIR/ddpar_test.img -r n -R $REMOTE_HOST
-```
-
-> **Voraussetzung:** Ein Remote-Backup aus Test 4.13.1.
-> Erwartung: `Source is remote (compressed, local decompression)` und pro Teil
-> `nc <host> <PORT> | zcat | dd of=… seek=…`.
-
-#### 4.13.3 Remote Check eines komprimierten Backups
-
-```bash
-./ddpar-check.sh -s $SOURCE_FILE -b $REMOTE_BACKUP_DIR/ddpar_test.img -r n -R $REMOTE_HOST
-sudo ./ddpar-check.sh -b $REMOTE_BACKUP_DIR/sdb -d $DEST_DEV -r n -R $REMOTE_HOST
-```
-
-> Erwartung: `Segment N: OK (<hash>)` je Segment. Die `.gz`-Teile werden über
-> SSH geholt und lokal ausgepackt; die Hashes beziehen sich auf die **Rohdaten**
-> des Segments, sind also mit denen eines unkomprimierten Backups identisch.
-
-#### 4.13.4 Hinweise / bekannte Grenzen
-
-- `-s` (Checksummen-Dateien) wird im Remote-Modus nicht angewendet; das Skript
-  weist darauf hin. Die Prüfung erfolgt über `ddpar-check.sh -r`.
-- Der Clone-Modus unterstützt `-c` nur mit `-r c` (siehe Test 4.4/4.5).
-
-### 4.14 Remote mit [De]Kompression auf der Gegenseite (Modus c + -c)
-
-> **Prinzip:** `gzip`/`zcat` laufen auf dem **Remote-Host** (dort also
-> erforderlich). Beim Backup/Restore gehen die Rohdaten über netcat — das
-> entlastet die lokale CPU, spart aber keine Bandbreite. Die erzeugten
-> `.gz`-Teile sind identisch zu denen aus Test 4.13; Backups aus beiden Modi
-> sind gegenseitig wiederherstell- und prüfbar.
-
-#### 4.14.1 Remote Backup, Kompression auf der Gegenseite
-
-```bash
-sudo ./ddpar.sh -i $SOURCE_DEV  -o $REMOTE_BACKUP_DIR -m backup -c -r c -R $REMOTE_HOST
-     ./ddpar.sh -i $SOURCE_FILE -o $REMOTE_BACKUP_DIR -m backup -c -r c -R $REMOTE_HOST
-```
-
-> Erwartung: pro Teil `dd if=… | nc <host> <PORT>` sowie auf dem Remote-Host
-> `nc -N -l <PORT> | gzip -6 > …-N.gz`. Erzeugte Dateien auf dem Remote-Host:
-> `$REMOTE_BACKUP_DIR/sdb-0.gz` … + `sdb-metadata.txt` (mit `COMPRESSION=1`).
-> Vor dem Beenden meldet das Skript „Warte auf den Abschluss der
-> Remote-Empfänger …“, damit die `.gz`-Dateien vollständig geschrieben sind.
-
-#### 4.14.2 Remote Restore, Dekompression auf der Gegenseite
-
-```bash
-sudo ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/sdb -o $DEST_DEV -r c -R $REMOTE_HOST
-     ./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/ddpar_test.img -o $DEST_DIR/ddpar_test.img -r c -R $REMOTE_HOST
-```
-
-> Erwartung: `Source is remote (compressed, remote decompression)` und pro Teil
-> `zcat "…-N.gz" | nc -N -l <PORT>` auf dem Remote-Host sowie lokal
-> `nc <host> <PORT> | dd of=… seek=…` (**ohne** lokales `zcat`).
-
-#### 4.14.3 Remote Check, Hashing auf der Gegenseite
-
-```bash
-./ddpar-check.sh -s $SOURCE_FILE -b $REMOTE_BACKUP_DIR/ddpar_test.img -r c -R $REMOTE_HOST
-sudo ./ddpar-check.sh -b $REMOTE_BACKUP_DIR/sdb -d $DEST_DEV -r c -R $REMOTE_HOST
-```
-
-> Erwartung: `Segment N: OK (<hash>)` je Segment. Ausgepackt und gehasht wird
-> auf dem Remote-Host (`zcat …gz | sha256sum`), über SSH geht nur der Hash.
-
-#### 4.14.4 Interoperabilität der Modi
-
-Ein mit `-r c` erzeugtes Backup lässt sich mit `-r n` wiederherstellen/prüfen
-und umgekehrt — die `.gz`-Teile unterscheiden sich nicht:
-
-```bash
-./ddpar.sh -i $SOURCE_FILE -o $REMOTE_BACKUP_DIR -m backup -c -r c -R $REMOTE_HOST
-./ddpar-restore.sh -i $REMOTE_BACKUP_DIR/ddpar_test.img -o $DEST_DIR/ddpar_test.img -r n -R $REMOTE_HOST
-./ddpar-check.sh -s $SOURCE_FILE -b $REMOTE_BACKUP_DIR/ddpar_test.img -r n -R $REMOTE_HOST
-```
-
-#### 4.14.5 Hinweise / bekannte Grenzen
-
-- Fehlt `gzip`/`zcat` auf dem Remote-Host, brechen die Skripte mit einer
-  klaren Meldung ab (in Modus `n` wird dort kein `gzip` benötigt).
-- `-r c` ohne `-c` hat nichts zu [de]komprimieren; das Skript weist darauf hin
-  und überträgt wie in Modus `n`.
-- Die Nutzdaten laufen auch in Modus `c` unverschlüsselt über netcat.
-
----
-
-## 5. Zusatzoptionen
-
-Die folgenden Optionen können mit den meisten Szenarien oben kombiniert werden.
-
-### 5.1 Checksummen aktivieren (-s)
-
-Beim Backup wird pro Teil eine SHA256-Checksumme erstellt:
-
-```bash
-./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -s
-```
-
-### 5.2 Anzahl der Jobs anpassen (-j)
-
-> Die Eingabegröße muss nicht durch die Anzahl der Jobs teilbar sein — ein
-> Rest wird vom letzten Teil übertragen.
-
-```bash
-./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -j 2
-./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -j 8
-```
-
-### 5.3 Blockgröße anpassen (-b)
-
-```bash
-./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -b 4194304
-```
-
-### 5.4 Debug-Modus (-d)
-
-> **Achtung:** Im Debug-Modus werden Passwörter im Klartext ausgegeben.
-
-```bash
-./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -d
-```
-
-### 5.5 Force-Modus (-f)
-
-Überschreibt vorhandene Dateien oder ignoriert Speicherplatz-Warnungen:
-
-```bash
-./ddpar.sh -i $SOURCE_FILE -o $BACKUP_DIR -m backup -f
-```
-
-## 6. Bash-Completion
-
-Die automatisierten Fälle stehen in `tests/completion.bats`. Manuell in einer
-interaktiven Bash (erwartetes Ergebnis jeweils als Kommentar):
-
-```bash
-source /usr/share/bash-completion/bash_completion
-source completions/ddpar
-
-ddpar -m ba<Tab>                  # -> backup
-ddpar -r <Tab>                    # n, c und alle Optionen (kein l)
-ddpar -m backup -o <Tab>          # nur Verzeichnisse
-ddpar-restore -i /backup/<Tab>    # Basisnamen aus *-metadata.txt
-ddpar-check -b /backup/<Tab>      # dito
-ddpar -R root@<Tab>               # Hosts aus ~/.ssh/config und known_hosts
-ddpar -r -R host -o <Tab>         # keine Vorschläge, kein SSH-Aufruf
-```
-
-Dateinamen mit `:` oder `=` (z. B. `db-12:00.img`) müssen genau einmal
-eingefügt werden, nicht als `db-12:db-12:00.img`.
-
-## 7. Debian-Paket
+## Debian-Paket prüfen
 
 ```bash
 make install-build-deps
-make deb                                  # führt lint und lokale Tests aus
-lintian --fail-on error ../ddpar_*_all.deb
-sudo apt install ../ddpar_*_all.deb
-python3 debian/tests/smoke                # installierte Programme testen
-man ddpar                                 # Handbuchseiten
+make deb
+deb="../ddpar_$(dpkg-parsechangelog -S Version)_all.deb"
+lintian --fail-on error "${deb}"
+(
+  set -eu
+  pkgroot=$(mktemp -d)
+  trap 'rm -rf -- "${pkgroot}"' EXIT
+  dpkg-deb -x "${deb}" "${pkgroot}"
+  python3 debian/tests/smoke --root "${pkgroot}"
+)
 ```
 
-Ohne Installation: `dpkg-deb -x ../ddpar_*_all.deb /tmp/pkg` und
-`python3 debian/tests/smoke --root /tmp/pkg`. Mit autopkgtest:
-`autopkgtest ../ddpar_*_all.deb -- null`.
+Der Paketbau führt die lokalen Skript- und Completion-Tests aus. Der Smoke-Test
+prüft alle sechs installierten Aufrufnamen, den registrierten Completion-Handler
+und einen Dateirundlauf. Auf einem System mit installiertem Paket genügt
+`python3 debian/tests/smoke`.

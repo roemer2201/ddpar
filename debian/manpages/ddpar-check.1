@@ -1,4 +1,4 @@
-.TH DDPAR-CHECK 1 "2026-10-17" "ddpar 1.1.0" "User Commands"
+.TH DDPAR-CHECK 1 "2026-11-19" "ddpar 1.1.1" "User Commands"
 .SH NAME
 ddpar-check \- verify a ddpar backup or clone using SHA256
 .SH SYNOPSIS
@@ -49,7 +49,7 @@ ddpar-check \-s source.img \-d /remote/clone.img \-r \-R user@host
 .SH NOTES
 Checks do not write to source, backup or destination. They detect corrupt or
 missing parts, invalid lengths and mismatching hashes.
-Use the clone's worker count and block size for clone checks.
+Worker count and block size may be chosen independently for a clone check.
 Remote checks use SSH rather than netcat for the data and hashes.
 .SH EXIT STATUS
 Zero indicates a matching comparison; nonzero indicates an error or mismatch.

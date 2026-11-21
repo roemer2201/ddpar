@@ -1,4 +1,4 @@
-.TH DDPAR-RESTORE 1 "2026-10-17" "ddpar 1.1.0" "User Commands"
+.TH DDPAR-RESTORE 1 "2026-11-19" "ddpar 1.1.1" "User Commands"
 .SH NAME
 ddpar-restore \- restore a segmented ddpar backup
 .SH SYNOPSIS
@@ -49,11 +49,13 @@ ddpar-restore \-i /backup/disk \-o restored.img \-r c \-R user@host \-y
 Restoration overwrites the destination. Regular files are truncated to the
 saved size; block devices keep data beyond the saved image.
 Incomplete backups and invalid part lengths are rejected. Compressed parts
-are checked including gzip CRC; local SHA256 files are checked when available.
+are checked including gzip CRC. Backups which declare SHA256 files require
+all of them, locally and remotely. For older backups, existing checksums are verified.
 Remote payloads use unencrypted netcat; only the SSH control channel is
 encrypted. Use remote transfers on trusted networks.
 .SH EXIT STATUS
-Zero indicates success; nonzero indicates an error or a refused operation.
+Zero indicates a successful restore or a declined confirmation prompt.
+A validation or transfer error returns nonzero.
 .SH SEE ALSO
 .BR ddpar (1),
 .BR ddpar-check (1)

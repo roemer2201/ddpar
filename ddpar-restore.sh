@@ -1,11 +1,11 @@
 #!/bin/bash
 #
 # Restore segmented backups into a file or block device.
-# Version: 1.0.3 (2026-10-17)
+# Version: 1.0.4 (2026-11-19)
 # Flow: read and validate metadata and parts; prepare the target; restore all
 # segments; collect local and remote worker results.
 
-# Fehler in zcat-/dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
+# Fehler in gzip-/dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
 # sonst zählt nur der letzte Befehl (z.B. ein erfolgreiches dd of=...).
 set -o pipefail
 # Resolve symlinked entry points (e.g. /usr/local/bin/ddpar) to the install dir.
@@ -21,6 +21,7 @@ REMOTE=0
 # Remote-Modus: "n" = netcat, Dekompression auf DIESER Maschine,
 # "c" = netcat, Dekompression auf der Remote-Maschine
 REMOTE_MODE="n"
+REMOTE_PORT=""
 REMOTE_HOST=""
 
 DEBUG=0
@@ -39,7 +40,7 @@ function show_help {
   echo "-r [nc]                 Remote-Restore über SSH+Netcat. Komprimierte Backups werden"
   echo "                        unterstützt. Remote-Optionen:"
   echo "                          n (Default): der Remote-Host sendet die .gz-Teile unverändert,"
-  echo "                            zcat läuft lokal (local decompression, kein gzip auf der Gegenseite)"
+  echo "                            gzip -dc läuft lokal (local decompression, kein gzip auf der Gegenseite)"
   echo "                          c: der Remote-Host packt die .gz-Teile selbst aus (remote decompression),"
   echo "                            über netcat gehen die Rohdaten; dort wird gzip benötigt"
   echo "-R user@host            Angabe des Remote-Host, auf dem das Backup liegt"
@@ -52,7 +53,7 @@ function show_help {
 }
 
 # Normalize aliases while preserving literal option values.
-OPTSTRING=":i:o:r::R:yPh"
+OPTSTRING=":i:o:r:R:yPh"
 ddpar_normalize_args "${OPTSTRING}" "$@"
 set -- "${DDPAR_ARGS[@]}"
 # Verwendung von getopts zur Verarbeitung der Optionen
@@ -73,12 +74,6 @@ while getopts "${OPTSTRING}" opt; do
           echo "Error: encrypted mode l is not implemented; refusing plaintext transfer." >&2
           exit 2
           ;;
-        -*)
-          # "-r" ohne Modus: getopts hat bereits die nächste Option als Argument
-          # gelesen. OPTIND zurücksetzen, damit sie regulär verarbeitet wird.
-          REMOTE_MODE="n"
-          OPTIND=$((OPTIND - 1))
-          ;;
         *)
           echo "Ungültiger Remote-Modus '${OPTARG}'. Gültige Angaben: l|n|c"
           exit 1
@@ -94,14 +89,8 @@ while getopts "${OPTSTRING}" opt; do
     h) show_help; exit 0;;
     \?) echo "Unknown option: -${OPTARG}" >&2; exit 2;;
     :)
-      # -r darf ohne Argument stehen (Default-Modus n), alle anderen Optionen nicht
-      if [ "$OPTARG" = "r" ]; then
-        REMOTE=1
-        REMOTE_MODE="n"
-      else
-        echo "Option -$OPTARG erfordert ein Argument."
-        exit 1
-      fi
+      echo "Error: option -${OPTARG} requires an argument." >&2
+      exit 2
       ;;
   esac
 done
@@ -168,13 +157,6 @@ function remote_port_generation {
   REMOTE_PORT=$(( REMOTE_PORT + 10000 ))
 }
 
-function check_remote_port_availability {
-  local listeners
-  listeners=$(execute_remote_command "ss -H -tln") || return 2
-  if grep -qE ":${CURRENT_REMOTE_PORT}[^0-9]" <<< "${listeners}"; then return 1; fi
-  return 0
-}
-
 function remote_restore_commands {
   [ "$DEBUG" -eq 1 ] && echo "[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen" >&2
   # Startet auf dem Remote-Host einen netcat-Sender, der die übergebene Quelle
@@ -187,7 +169,7 @@ function remote_restore_commands {
   fi
   CURRENT_REMOTE_PORT=$((10000 + (REMOTE_PORT - 10000 + PART_NUM) % 32768))
   while true; do
-    if check_remote_port_availability; then
+    if remote_port_matches free; then
       break
     else
       [ "$?" -eq 2 ] && return 1
@@ -209,7 +191,7 @@ function remote_restore_commands {
   ATTEMPT=1
   while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     echo "Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)..."
-    if execute_remote_command "ss -tuln | grep -qE :${CURRENT_REMOTE_PORT}[^0-9]"; then
+    if remote_port_matches listening; then
       echo "Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop."
       break
     else
@@ -308,27 +290,10 @@ function wait_for_jobs {
 
 trap ddpar_cancel INT TERM
 
-function part_bytes {
-  # Bytes, die Teil $1 enthält: normale Teile SPLIT_SIZE, der letzte Teil
-  # zusätzlich den nicht gleichmäßig verteilbaren Rest; bei Backups kleiner
-  # als NUM_JOBS Blöcke ggf. weniger oder 0.
-  local part=$1
-  local start=$((part * SPLIT_SIZE))
-  local remaining=$((INPUT_SIZE - start))
-  if [ "${remaining}" -le 0 ]; then
-    echo 0
-  elif [ "${part}" -eq $((NUM_JOBS - 1)) ] || [ "${remaining}" -lt "${SPLIT_SIZE}" ]; then
-    echo "${remaining}"
-  else
-    echo "${SPLIT_SIZE}"
-  fi
-}
-
 function restore_split_image {
   echo "Starte die Prozesse ..."
   if [ ! -b "${OUTPUT_FILE}" ]; then
     # conv=notrunc protects parallel workers, so truncate exactly once up front.
-    truncate -s "${INPUT_SIZE}" -- "${OUTPUT_FILE}" || { INTERNAL_EXITCODE=1; return 1; }
     if [ "$SKIP_PREALLOC" -eq 1 ]; then
       echo "Vorab-Reservierung des Zielplatzes übersprungen (-P)."
     elif [ "${INPUT_SIZE}" -eq 0 ]; then
@@ -337,12 +302,13 @@ function restore_split_image {
       echo "Warnung: fallocate ist nicht verfügbar, Vorab-Reservierung wird übersprungen."
     else
       echo "fallocate -l ${INPUT_SIZE} $OUTPUT_FILE"
-      if ! fallocate -l "${INPUT_SIZE}" "${OUTPUT_FILE}"; then
+      if ! fallocate -l "${INPUT_SIZE}" -- "${OUTPUT_FILE}"; then
         echo "Fehler: Speicherplatz für ${OUTPUT_FILE} konnte nicht reserviert werden (fallocate). Mit -P kann die Reservierung übersprungen werden."
         INTERNAL_EXITCODE=1
         return 1
       fi
     fi
+    truncate -s "${INPUT_SIZE}" -- "${OUTPUT_FILE}" || { INTERNAL_EXITCODE=1; return 1; }
   fi
 
   local PART_NUM START COUNT_BYTES
@@ -371,7 +337,7 @@ function restore_split_image {
       nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" </dev/null | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
     elif [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ]; then
       # Remote netcat restore mit lokaler Dekompression: der Remote-Host sendet
-      # die .gz-Datei unverändert, zcat läuft auf DIESER Maschine. Über das Netz
+      # die .gz-Datei unverändert, gzip -dc läuft auf DIESER Maschine. Über das Netz
       # geht nur der komprimierte Strom, die Remote-Seite benötigt kein gzip.
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is remote (compressed, local decompression)"
@@ -381,8 +347,8 @@ function restore_split_image {
         INTERNAL_EXITCODE=1
         break
       fi
-      echo "nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT} </dev/null | zcat | ${dd_out[*]}"
-      nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" </dev/null | zcat | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
+      echo "nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT} </dev/null | gzip -dc | ${dd_out[*]}"
+      nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" </dev/null | gzip -dc | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
     elif [ $REMOTE -eq 1 ]; then
       # Remote netcat restore, unkomprimiert: Remote sendet, lokal wird empfangen und geschrieben
       if [ $PART_NUM -eq 0 ]; then
@@ -399,7 +365,7 @@ function restore_split_image {
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is compressed"
       fi
-      echo "zcat ${INPUT_FILES}${PART_NUM}.gz | ${dd_out[*]}"
+      echo "gzip -dc -- ${INPUT_FILES}${PART_NUM}.gz | ${dd_out[*]}"
       gzip -dc -- "${INPUT_FILES}${PART_NUM}.gz" | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
     else
       if [ $PART_NUM -eq 0 ]; then
@@ -418,14 +384,10 @@ if [ -z "${INPUT:-}" ] || [ -z "${OUTPUT:-}" ]; then
   exit 2
 fi
 
-# Create spinoff variables
-INPUT_PATH=$(dirname -- "${INPUT}")
-INPUT_FILE_BASENAME=$(basename -- "${INPUT}")
-INPUT_FILES="${INPUT_PATH}/${INPUT_FILE_BASENAME}-"
-#OUTPUT_PATH=/dev
-#OUTPUT_FILE_BASENAME=sdi
-#OUTPUT_FILE="${OUTPUT_PATH}/${OUTPUT_FILE_BASENAME}"
-OUTPUT_FILE_TYPE="$(file -Lb -- "${OUTPUT}")"
+# The argument is a filename prefix, even if an unrelated file has that name.
+INPUT_FILE_BASENAME=${INPUT##*/}
+ddpar_basename "${INPUT_FILE_BASENAME}" || { echo 'Error: invalid backup basename.' >&2; exit 2; }
+INPUT_FILES="${INPUT}-"
 METADATA_FILE="${INPUT_FILES}metadata.txt"
 
 # Get parameters from metadata file (lokal oder remote)
@@ -437,17 +399,11 @@ if [ $REMOTE -eq 1 ]; then
     fi
   done
   connect_ssh || exit 1
-  METADATA_SRC=$(mktemp)
-  execute_remote_command "cat -- $(shell_quote "${METADATA_FILE}")" > "${METADATA_SRC}" 2>/dev/null
-  if [ ! -s "$METADATA_SRC" ]; then
-    echo "Die Metadatendatei $METADATA_FILE auf $REMOTE_HOST existiert nicht oder ist leer."
-    rm -f "$METADATA_SRC"
-    close_ssh_connection
-    exit 1
-  fi
+  METADATA_SRC=$(mktemp) || exit 1
+  ddpar_fetch_metadata "${METADATA_FILE}" "${METADATA_SRC}" || exit 1
 else
   METADATA_SRC="$METADATA_FILE"
-  if [ ! -e "$METADATA_SRC" ]; then
+  if [ ! -f "$METADATA_SRC" ]; then
     echo "Die Datei existiert $METADATA_FILE nicht."
     exit 1
   fi
@@ -460,18 +416,18 @@ fi
 
 # Komprimierte Backups werden im Remote-Modus "n" (und lokal) auf DIESER
 # Maschine ausgepackt (local decompression); im Remote-Modus "c" übernimmt das
-# der Remote-Host (remote decompression). zcat muss also auf der jeweils
+# der Remote-Host (remote decompression). gzip muss also auf der jeweils
 # auspackenden Seite vorhanden sein.
 if [ -n "$COMPRESSION" ]; then
   if [ $REMOTE -eq 1 ] && [ "$REMOTE_MODE" = "c" ]; then
-    if ! execute_remote_command "command -v zcat > /dev/null 2>&1"; then
-      echo "Fehler: Das Backup ist komprimiert und -r c verlangt zcat (gzip) auf ${REMOTE_HOST}, dort ist es nicht verfügbar."
+    if ! execute_remote_command "command -v gzip > /dev/null 2>&1"; then
+      echo "Fehler: Das Backup ist komprimiert und -r c verlangt gzip auf ${REMOTE_HOST}, dort ist es nicht verfügbar."
       rm -f "$METADATA_SRC"
       close_ssh_connection
       exit 1
     fi
-  elif ! command -v zcat > /dev/null 2>&1; then
-    echo "Fehler: Das Backup ist komprimiert, aber zcat (gzip) ist lokal nicht verfügbar."
+  elif ! command -v gzip > /dev/null 2>&1; then
+    echo "Fehler: Das Backup ist komprimiert, aber gzip ist lokal nicht verfügbar."
     if [ $REMOTE -eq 1 ]; then
       rm -f "$METADATA_SRC"
       close_ssh_connection
@@ -495,9 +451,9 @@ for ((part=0; part<NUM_JOBS; part++)); do
   if [ "${REMOTE}" -eq 1 ]; then
     if [ -n "${COMPRESSION}" ]; then
       if [ "${REMOTE_MODE}" = c ]; then
-        part_size=$(execute_remote_command "gzip -dc -- $(shell_quote "${part_file}") | wc -c") || exit 1
+        part_size=$(execute_remote_command "test -f $(shell_quote "${part_file}") && gzip -dc < $(shell_quote "${part_file}") | wc -c") || exit 1
       else
-        part_size=$(execute_remote_command "cat -- $(shell_quote "${part_file}")" | gzip -dc | wc -c) || exit 1
+        part_size=$(execute_remote_command "test -f $(shell_quote "${part_file}") && cat -- $(shell_quote "${part_file}")" | gzip -dc | wc -c) || exit 1
       fi
     else
       part_size=$(execute_remote_command "test -f $(shell_quote "${part_file}") && stat -Lc %s -- $(shell_quote "${part_file}")") || exit 1
@@ -508,93 +464,44 @@ for ((part=0; part<NUM_JOBS; part++)); do
     fi
   else
     ddpar_verify_part "${part_file}" "$(part_bytes "${part}")" || exit 1
-    if [ -e "${INPUT_FILES}${part}.sha256" ]; then
-      expected=$(ddpar_checksum "${INPUT_FILES}${part}.sha256") || exit 1
+  fi
+  sidecar="${INPUT_FILES}${part}.sha256"
+  if [ "${REMOTE}" -eq 1 ]; then
+    expected=$(ddpar_remote_expected_checksum "${sidecar}") || exit 1
+  else
+    expected=$(ddpar_expected_checksum "${sidecar}" "${PART_CHECKSUMS}") || exit 1
+  fi
+  if [ -n "${expected}" ]; then
+    if [ "${REMOTE}" -eq 1 ]; then
+      actual=$(ddpar_remote_part_hash "${part_file}") || exit 1
+    else
       actual=$(ddpar_part_stream "${part_file}" | sha256sum | cut -d' ' -f1) || exit 1
-      if [ "${expected}" != "${actual}" ]; then
-        echo "Error: backup checksum mismatch: ${part_file}" >&2
-        exit 1
-      fi
+    fi
+    if [ "${expected}" != "${actual}" ]; then
+      echo "Error: backup checksum mismatch: ${part_file}" >&2
+      exit 1
     fi
   fi
 done
 
-# Überprüfung der erforderlichen Parameter
-if [ -z "$INPUT_PATH" ] || [ -z "$INPUT_FILE_BASENAME" ] || [ -z "$OUTPUT" ]; then
-  echo "Fehlende Parameter. Bitte geben Sie alle erforderlichen Parameter an."
+# Resolve a directory destination once. Inspect the actual target before
+# preallocation, including device links within the specified directory.
+OUTPUT_FILE=${OUTPUT}
+if [ -d "${OUTPUT}" ]; then
+  OUTPUT_FILE="${OUTPUT}/${FILE_NAME:-${INPUT_FILE_BASENAME}}"
+fi
+if [ -b "${OUTPUT_FILE}" ]; then
+  OUTPUT_SIZE=$(blockdev --getsize64 "${OUTPUT_FILE}") || exit 1
+  if [ "${OUTPUT_SIZE}" -lt "${INPUT_SIZE}" ]; then
+    echo "Error: target device ${OUTPUT_FILE} (${OUTPUT_SIZE} bytes) is smaller than the backup (${INPUT_SIZE} bytes)." >&2
+    exit 1
+  fi
+elif [[ -e "${OUTPUT_FILE}" && ! -f "${OUTPUT_FILE}" ]] || [[ -L "${OUTPUT_FILE}" && ! -e "${OUTPUT_FILE}" ]]; then
+  echo "Error: unsupported restore target: ${OUTPUT_FILE}" >&2
   exit 1
 fi
-
-if [ -e "${OUTPUT}" ]; then
-  # Determine the type of the output
-  OUTPUT_FILE_TYPE=$(file -Lb -- "${OUTPUT}")
-  # Use the appropriate command to determine destination types and sizes
-  case "$OUTPUT_FILE_TYPE" in
-    # Wenn OUTPUT_FILE ein Blockdevice ist, prüfen, ob OUTPUT_FILE groß genug ist.
-    "block special"*)
-      OUTPUT_SIZE=$(blockdev --getsize64 "${OUTPUT}")
-      if [ "$INPUT_SIZE" -gt "$OUTPUT_SIZE" ]; then
-        echo "Fehler: Die Eingabegröße ($INPUT_SIZE) ist größer als die Ausgabegröße ($OUTPUT_SIZE)."
-        exit 1
-      fi
-      OUTPUT_FILE="$OUTPUT"
-      ;;
-    # Wenn OUTPUT ein Verzeichnis ist, prüfen, ob genügend freier Speicherplatz vorhanden ist.
-    directory)
-      AVAILABLE_SPACE=$(df -B 1 "$OUTPUT" | awk 'NR==2{print $4}')
-      if [ ! "$AVAILABLE_SPACE" -ge "$INPUT_SIZE" ]; then
-        echo "Fehler: Nicht genügend Speicherplatz vorhanden für $INPUT_FILE_BASENAME in $OUTPUT ."
-        exit 1
-      fi
-      # Basename aus den Metadaten (FILE_NAME); Fallback: Basisname von -i
-      OUTPUT_FILE="$OUTPUT/${FILE_NAME:-$INPUT_FILE_BASENAME}"
-      ;;
-    # Wenn OUTPUT eine Datei ist (die bereits exitiert), prüfen, ob genügend freier Speicherplatz vorhanden ist.
-    *)
-      OUTPUT_DIR=$(dirname -- "$OUTPUT")
-      OUTPUT_FILE="$OUTPUT"
-      AVAILABLE_SPACE=$(df -B 1 "$OUTPUT_DIR" | awk 'NR==2{print $4}')
-      if [ ! "$AVAILABLE_SPACE" -ge "$INPUT_SIZE" ]; then
-        echo "Fehler: Nicht genügend Speicherplatz vorhanden für $INPUT_FILE_BASENAME in $OUTPUT_DIR ."
-        exit 1
-      fi
-      ;;
-  esac
-else
-  # Wenn OUTPUT eine Datei ist (die nicht exitiert), prüfen, ob genügend freier Speicherplatz vorhanden ist.
-  OUTPUT_DIR=$(dirname -- "$OUTPUT")
-  OUTPUT_FILE="$OUTPUT"
-  AVAILABLE_SPACE=$(df -B 1 "$OUTPUT_DIR" | awk 'NR==2{print $4}')
-    if [ ! "$AVAILABLE_SPACE" -ge "$INPUT_SIZE" ]; then
-      echo "Fehler: Nicht genügend Speicherplatz vorhanden für $INPUT_FILE_BASENAME in $OUTPUT_DIR ."
-      exit 1
-    fi
-  if [ -w "$OUTPUT_DIR" ]; then
-    : # Create the target only after confirmation and validation.
-  else
-    echo "Fehler: Kein Schreibzugriff auf das Verzeichnis $OUTPUT_DIR vorhanden."
-    exit 1
-  fi
-
-fi
-
-# Resolve the final destination, including symlinks, before preallocation.
-if [ -e "${OUTPUT_FILE}" ]; then
-  if [ ! -f "${OUTPUT_FILE}" ] && [ ! -b "${OUTPUT_FILE}" ]; then
-    echo "Error: unsupported restore target: ${OUTPUT_FILE}" >&2
-    exit 1
-  fi
-  OUTPUT_FILE_TYPE=$(file -Lb -- "${OUTPUT_FILE}") || exit 1
-  if [ -b "${OUTPUT_FILE}" ]; then
-    OUTPUT_SIZE=$(blockdev --getsize64 "${OUTPUT_FILE}") || exit 1
-    if [ "${OUTPUT_SIZE}" -lt "${INPUT_SIZE}" ]; then
-      echo "Error: target device ${OUTPUT_FILE} (${OUTPUT_SIZE} bytes) is smaller than the backup (${INPUT_SIZE} bytes)." >&2
-      exit 1
-    fi
-  fi
-fi
 if [ "${REMOTE}" -ne 1 ]; then
-  for part_file in "${METADATA_FILE}" "${INPUT_FILES}"*.part "${INPUT_FILES}"*.gz "${INPUT_FILES}"*.sha256; do
+  for part_file in "${METADATA_FILE}" "${INPUT_FILES}"*.part "${INPUT_FILES}"*.gz "${INPUT_FILES}"*.sha256 "${METADATA_FILE}.old"; do
     if [ "${OUTPUT_FILE}" -ef "${part_file}" ]; then
       echo "Error: restore target aliases the backup: ${part_file}" >&2
       exit 1
@@ -614,7 +521,7 @@ elif [ ! -w "$(dirname -- "$OUTPUT_FILE")" ]; then
   exit 1
 fi
 
-echo "Nachfolgend werden die geteilten Dateien unter $INPUT_PATH/$INPUT_FILE_BASENAME nach $OUTPUT_FILE geschrieben."
+echo "Nachfolgend werden die geteilten Dateien unter ${INPUT} nach $OUTPUT_FILE geschrieben."
 if [ "$ASSUME_YES" -eq 1 ]; then
   echo "Sicherheitsabfrage übersprungen (-y). Beginning to restore ..."
   restore_split_image
@@ -643,18 +550,6 @@ else
   done
 fi
 
-#if [[ "$INPUT_FILE_TYPE" == "block special"* ]] && [[ "$OUTPUT_FILE_TYPE" == "block special"* ]]; then
-#  echo "Beginning to restore ..."
-#  restore_split_image
-#else
-#  echo "Input File Type ($INPUT_FILE_TYPE) stimmt nicht mit Output File Type ($OUTPUT_FILE_TYPE) überein."
-#fi
-#if [[ "$INPUT_FILE_TYPE" != "block special"* ]] && [[ "$OUTPUT_FILE_TYPE" != "block special"* ]]; then
-#  echo "Beginning to restore ..."
-#  restore_split_image
-#else
-#  echo "Input File Type ($INPUT_FILE_TYPE) stimmt nicht mit Output File Type ($OUTPUT_FILE_TYPE) überein."
-#fi
 wait_for_jobs
 
 if [ $REMOTE -eq 1 ]; then

@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Clone or back up files and block devices in parallel segments.
-# Version: 1.0.3 (2026-10-17)
+# Version: 1.0.4 (2026-11-19)
 # Flow: validate options and endpoints; calculate segments; run local or remote
 # workers; collect every worker's result before reporting success.
 
@@ -13,6 +13,8 @@ set -o pipefail
 source "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/ddpar-common.sh" || exit 1
 
 # Standardwerte für die Parameter
+FORCE=""
+REMOTE_PORT=""
 INPUT_FILE=""
 OUTPUT_PATH=""
 MODE="clone"
@@ -37,8 +39,9 @@ function show_help {
   echo "Verwendung: $SCRIPT_NAME [Optionen]"
   echo ""
   echo "Optionen:"
-  echo "-i FILE|DEVICE          Die Eingabedatei"
-  echo "-o FILE|DEVICE|PATH     Der Ausgabepfad"
+  echo "-i, --input FILE|DEVICE Die Eingabedatei"
+  echo "-o, --output FILE|DEVICE|PATH"
+  echo "                        Der Ausgabepfad"
   echo "-m clone|backup         Ziel des Vorgangs (Default: clone)"
   echo "-j NUM                  Die Anzahl der Jobs (Default: 4)"
   echo "-b NUM                  Die Blockgröße in Bytes (Default: 1048576 Bytes (1 MiB))"
@@ -67,7 +70,7 @@ function show_help {
 
 function option_analysis {
   # Normalize aliases while preserving literal option values.
-  local optstring=":i:o:m:j:b:n:r::R:csfhd"
+  local optstring=":i:o:m:j:b:n:r:R:csfhd"
   ddpar_normalize_args "${optstring}" "$@"
   set -- "${DDPAR_ARGS[@]}"
   # Verwendung von getopts zur Verarbeitung der Optionen
@@ -103,7 +106,7 @@ function option_analysis {
 		#PS4="${SETXCOLOR}>> ${LINENO}: ${NOCOLOR}"
 		#PS4="${SETXCOLOR} ${NOCOLOR}"
 		PS4="${SETXCOLOR}$(printf "%*s" "${SHLVL}" "" | tr " " "+") ${NOCOLOR}"
-		echo -e "${WARNCOLOR}[WARN] DEBUG mode enabled, passwords get printed as clear text!${NOCOLOR}"
+		echo -e "${WARNCOLOR}[WARN] Debug tracing enabled.${NOCOLOR}"
 		;;
 	  s)
         CHECKSUM=1
@@ -123,13 +126,6 @@ function option_analysis {
             echo "Error: encrypted mode l is not implemented; refusing plaintext transfer." >&2
             exit 2
             ;;
-          -*)
-            # "-r" ohne Modus: getopts hat bereits die nächste Option als
-            # Argument gelesen. OPTIND zurücksetzen, damit sie regulär
-            # verarbeitet wird, und den Default-Modus verwenden.
-            REMOTE_MODE="n"
-            OPTIND=$((OPTIND - 1))
-            ;;
           *)
             echo -e "${ERRORCOLOR}Ungültiger Remote-Modus '${OPTARG}'. Gültige Angaben: l|n|c${NOCOLOR}"
             exit 1
@@ -145,14 +141,8 @@ function option_analysis {
       h) show_help; exit 0;;
       \?) echo "Ungültige Option: -${OPTARG}"; show_help; exit 1;;
       :)
-        # -r darf ohne Argument stehen (Default-Modus n), alle anderen Optionen nicht
-        if [ "${OPTARG}" = "r" ]; then
-          REMOTE=1
-          REMOTE_MODE="n"
-        else
-          echo -e "${ERRORCOLOR}Option -${OPTARG} erfordert ein Argument.${NOCOLOR}"
-          exit 1
-        fi
+        echo "Error: option -${OPTARG} requires an argument." >&2
+        exit 2
         ;;
     esac
   done
@@ -311,9 +301,6 @@ function check_remote_commands_availability {
         commands+=("gzip")
     fi
 
-    if [ "$CHECKSUM" -eq 1 ]; then
-        commands+=("sha256sum")
-    fi
 
     for cmd in "${commands[@]}"; do
         if ! execute_remote_command "command -v \"$cmd\"" &> /dev/null; then
@@ -340,7 +327,7 @@ function check_commands_availability {
         commands+=("gzip")
     fi
 
-    if [ "$CHECKSUM" -eq 1 ]; then
+    if [[ "${CHECKSUM}" == 1 && "${REMOTE}" == 0 && "${MODE}" == backup ]]; then
         commands+=("sha256sum")
     fi
     
@@ -396,7 +383,7 @@ function input_analysis {
   echo "\$INPUT_FILE_TYPE = $INPUT_FILE_TYPE"
 
   # Use the appropriate command to calculate the size of the input file
-  if [[ "${INPUT_FILE_TYPE}" == "block special"* ]]; then
+  if [ -b "${INPUT}" ]; then
     #echo "INPUT_SIZE=$(blockdev --getsize64 $INPUT)"
     INPUT_SIZE=$(blockdev --getsize64 "${INPUT}") || exit 1
     echo "\$INPUT_SIZE=${INPUT_SIZE}"
@@ -419,8 +406,8 @@ function output_analysis {
 
 	# Use the appropriate command to calculate the size of the output file
 	echo "\$OUTPUT_FILE_TYPE: ${OUTPUT_FILE_TYPE}"
-	if [[ "${OUTPUT_FILE_TYPE}" == "block special"* ]]; then
-		OUTPUT_SIZE=$(execute_command blockdev --getsize64 "${OUTPUT}")
+	if execute_command test -b "${OUTPUT}"; then
+		OUTPUT_SIZE=$(execute_command blockdev --getsize64 "${OUTPUT}") || exit 1
 		echo "\$OUTPUT_SIZE = $OUTPUT_SIZE"
 	else
 		OUTPUT_SIZE=$(execute_command stat -Lc %s -- "${OUTPUT}")
@@ -433,13 +420,6 @@ function remote_port_generation {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
     # RANDOM yields 0-32767, so the effective port range is 10000-42767
     REMOTE_PORT=$(( RANDOM + 10000 ))
-}
-
-function check_remote_port_availability {
-  local listeners
-  listeners=$(execute_remote_command "ss -H -tln") || return 2
-  if grep -qE ":${CURRENT_REMOTE_PORT}[^0-9]" <<< "${listeners}"; then return 1; fi
-  return 0
 }
 
 function size_calculation {
@@ -466,26 +446,10 @@ function size_calculation {
   fi
 }
 
-function part_bytes {
-	# Bytes, die Teil $1 überträgt: normale Teile SPLIT_SIZE, der letzte Teil
-	# zusätzlich den nicht gleichmäßig verteilbaren Rest; bei Eingaben kleiner
-	# als NUM_JOBS Blöcke ggf. weniger oder 0.
-	local part=$1
-	local start=$((part * SPLIT_SIZE))
-	local remaining=$((INPUT_SIZE - start))
-	if [ "${remaining}" -le 0 ]; then
-		echo 0
-	elif [ "${part}" -eq $((NUM_JOBS - 1)) ] || [ "${remaining}" -lt "${SPLIT_SIZE}" ]; then
-		echo "${remaining}"
-	else
-		echo "${SPLIT_SIZE}"
-	fi
-}
-
 function clone_file {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
     # generate further spinoff variables
-    INPUT_FILE_NAME=$(basename -- "${INPUT}")
+    INPUT_FILE_NAME=${INPUT##*/}
 
     # Resolve the actual filename before enforcing overwrite protection.
     if execute_command test -d "${OUTPUT}"; then
@@ -493,14 +457,19 @@ function clone_file {
     else
         OUTPUT_PATH="${OUTPUT}"
     fi
-    if execute_command test -e "${OUTPUT_PATH}" && [ -z "${FORCE}" ]; then
+    if execute_command test -e "${OUTPUT_PATH}"; then
+      if [ -z "${FORCE}" ]; then
         echo "Error: ${OUTPUT_PATH} already exists; use -f to overwrite it." >&2
         return 1
-    fi
-    if execute_command test -e "${OUTPUT_PATH}" &&
-       ! execute_command test -f "${OUTPUT_PATH}" && ! execute_command test -b "${OUTPUT_PATH}"; then
+      fi
+      if ! execute_command test -f "${OUTPUT_PATH}" && ! execute_command test -b "${OUTPUT_PATH}"; then
         echo "Error: unsupported clone destination: ${OUTPUT_PATH}" >&2
         return 1
+      fi
+    else
+      # O_EXCL prevents concurrent creators and dangling symlinks from
+      # bypassing the overwrite check before the parallel writers open it.
+      execute_command dd of="${OUTPUT_PATH}" conv=excl count=0 status=none || return 1
     fi
     if execute_command test -b "${OUTPUT_PATH}"; then
         local target_size
@@ -518,13 +487,7 @@ function clone_file {
 function clone_block {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
     echo "Prüfe Klon-Parameter."
-    # Wird wahrscheinlich nicht mehr gebraucht:
-    #if [[ "${INPUT_FILE_TYPE}" != "block special"* ]]; then
-    #    echo "Fehler: Ungültige Eingabe-Typ. Erforderlich: block special. Nur Block-Geräte können geklont werden."
-    #    # Hier kannst du den Code für den Fehlerfall des Eingabe-Typs einfügen
-    #    exit 1
-    #fi        
-    if [[ "${OUTPUT_FILE_TYPE}" != "block special"* ]]; then
+    if ! execute_command test -b "${OUTPUT}"; then
         echo -e "${ERRORCOLOR}Fehler: Ungültiger Ausgabe-Typ. Erforderlich: block special. Beim Klonen eines Block-Gerätes muss das Ziel ebenfalls ein Block-Gerät sein.${NOCOLOR}"
         # Hier kannst du den Code für den Fehlerfall des Ausgabe-Typs einfügen
         exit 1
@@ -630,7 +593,7 @@ function setup_remote_listener {
 	CURRENT_REMOTE_PORT=$((10000 + (REMOTE_PORT - 10000 + PART_NUM) % 32768))
 	# Schleife zum Generieren eines freien Ports
 	while true; do
-		if check_remote_port_availability; then
+		if remote_port_matches free; then
 			break
 		else
 			[ "$?" -eq 2 ] && return 1
@@ -656,7 +619,7 @@ function setup_remote_listener {
 	# Schleife, die den Status des Ports überprüft
 	while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
 		echo -e "${INFOCOLOR}Checking if remote process is running on port ${CURRENT_REMOTE_PORT} (attempt $ATTEMPT)...${NOCOLOR}"
-		if execute_remote_command "ss -tln | grep -qE :${CURRENT_REMOTE_PORT}[^0-9]"; then
+		if remote_port_matches listening; then
 			echo -e "${INFOCOLOR}Process found on port ${CURRENT_REMOTE_PORT}. Exiting loop.${NOCOLOR}"
 			break
 		else
@@ -676,17 +639,40 @@ function setup_remote_listener {
 	fi
 }
 
+# Check each generated name before any metadata or data file is opened.
+ddpar_check_artifacts() {
+	local prefix="${1}" jobs="${2}" source="${3:-}" part name links
+	local -a names=(metadata.txt metadata.txt.old)
+	for ((part=0; part<jobs; part++)); do
+		names+=("${part}.part" "${part}.gz" "${part}.sha256")
+	done
+	for name in "${names[@]}"; do
+		name="${prefix}${name}"
+		if [[ ! -e "${name}" && ! -L "${name}" ]]; then continue; fi
+		if [[ -L "${name}" || ! -f "${name}" || ( -n "${source}" && "${source}" -ef "${name}" ) ]]; then
+			echo "Error: unsafe backup output: ${name}" >&2
+			return 1
+		fi
+		links=$(stat -c %h -- "${name}") || return 1
+		if [[ "${links}" != 1 ]]; then
+			echo "Error: backup output has multiple hard links: ${name}" >&2
+			return 1
+		fi
+	done
+}
+
 function backup_mode {
 	[ "$DEBUG" -eq 1 ] && echo -e "${DEBUGCOLOR}[DEBUG] Funktion ${FUNCNAME[0]} aufgerufen${NOCOLOR}" >&2
 	# Sichert die Eingabe in NUM_JOBS Teil-Dateien (.part bzw. .gz) inklusive
 	# Metadatendatei. Bei REMOTE=1 landen die Teile per netcat auf dem Remote-Host.
-	if [[ "${OUTPUT_FILE_TYPE}" != *"directory"* ]]; then
+	if ! execute_command test -d "${OUTPUT}"; then
 		echo -e "${ERRORCOLOR}Fehler: Ungültiger Ausgabe-Typ ${OUTPUT_FILE_TYPE}. Erforderlich: directory.${NOCOLOR}"
 		exit 1
 	fi
 	# Freier Speicher im Zielpfad analysieren (lokal; remote netcat backup ohne diese Pruefung)
 	if [ $REMOTE -ne 1 ]; then
-		FREE_SPACE=$(df -P -B 1 "${OUTPUT}" | awk 'NR==2 {print $4}')
+		FREE_SPACE=$(df -B1 --output=avail -- "${OUTPUT}" | awk 'NR==2 {print $1}') || return 1
+		ddpar_uint "${FREE_SPACE}" || { echo "Error: invalid free space for ${OUTPUT}." >&2; return 1; }
 		if [ -z "$FORCE" ] && (( INPUT_SIZE > FREE_SPACE )); then
 			echo -e "${ERRORCOLOR}Fehler: Eingabegröße (${INPUT_SIZE}) überschreitet den verfügbaren Speicherplatz (${FREE_SPACE}).${NOCOLOR}"
 			exit 1
@@ -699,7 +685,7 @@ function backup_mode {
 	echo -e "${SUCCESSCOLOR}Führe die Backup-Aktion durch.${NOCOLOR}"
 
 	# generate further spinoff variables
-	INPUT_FILE_NAME=$(basename -- "${INPUT}")
+	INPUT_FILE_NAME=${INPUT##*/}
 	# Eigener Basisname via -n, sonst Basename der Eingabe
 	OUTPUT_FILE_NAME=${BASE_NAME:-${INPUT_FILE_NAME}}
 	OUTPUT_FILE="${OUTPUT}/${OUTPUT_FILE_NAME}-"
@@ -709,19 +695,13 @@ function backup_mode {
 		echo 'Error: backup basename must fit one metadata line.' >&2
 		return 1
 	fi
-	# Reject generated symlinks and source aliases before any output is opened.
-	local artifact part suffix
-	local artifacts=("${METADATA_FILE}" "${METADATA_FILE}.old")
-	for ((part=0; part<NUM_JOBS; part++)); do
-		for suffix in part gz sha256; do artifacts+=("${OUTPUT_FILE}${part}.${suffix}"); done
-	done
-	for artifact in "${artifacts[@]}"; do
-		if execute_command test -L "${artifact}" ||
-		   { [ "${REMOTE}" -ne 1 ] && [ "${INPUT}" -ef "${artifact}" ]; }; then
-			echo "Error: unsafe backup output: ${artifact}" >&2
-			return 1
-		fi
-	done
+	# Validate the generated entries together on the output host. Reusing a
+	# multiply-linked file would also overwrite every other name for that inode.
+	if [ "${REMOTE}" -eq 1 ]; then
+		execute_remote_command "$(declare -f ddpar_check_artifacts); ddpar_check_artifacts $(shell_quote "${OUTPUT_FILE}") ${NUM_JOBS}" || return 1
+	else
+		ddpar_check_artifacts "${OUTPUT_FILE}" "${NUM_JOBS}" "${INPUT}" || return 1
+	fi
 
 	# Write metadata file (lokal oder remote)
 	if [ $REMOTE -eq 1 ]; then
@@ -745,6 +725,9 @@ function backup_mode {
 	append_metadata "BACKUP_STATE=incomplete" || return 1
 	append_metadata "NUM_JOBS=${NUM_JOBS}" || return 1
 	# FILE_NAME = Basisname der Backup-Dateien (bei -n abweichend von INPUT_FILE_NAME)
+	if [ "${CHECKSUM}" -eq 1 ] && [ "${REMOTE}" -eq 0 ]; then
+		append_metadata "PART_CHECKSUMS=1" || return 1
+	fi
 	append_metadata "FILE_NAME=${OUTPUT_FILE_NAME}" || return 1
 	append_metadata "BLOCKSIZEBYTES=${BLOCKSIZEBYTES}" || return 1
 	append_metadata "INPUT_SIZE=${INPUT_SIZE}" || return 1
@@ -977,20 +960,11 @@ echo -e "${SUCCESSCOLOR}Initialisierung erfolgreich${NOCOLOR}"
 
 case $MODE in
     "clone")
-        case ${INPUT_FILE_TYPE} in
-            "block special"*)
-                echo "Do block special cloning"
-                clone_block || INTERNAL_EXITCODE=1
-                ;;
-            "directory")
-                echo -e "${ERRORCOLOR}Input-type is directory, which cannot be cloned using this script. Exiting ...${NOCOLOR}"
-                INTERNAL_EXITCODE=1
-                ;;
-            *)
-                echo "Try cloning this file..."
-                clone_file || INTERNAL_EXITCODE=1
-                ;;
-        esac
+        if [ -b "${INPUT}" ]; then
+            clone_block || INTERNAL_EXITCODE=1
+        else
+            clone_file || INTERNAL_EXITCODE=1
+        fi
         # Wait for all jobs to finish and collect their exit codes
         wait_for_jobs
         ;;
