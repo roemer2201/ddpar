@@ -317,17 +317,17 @@ if [ -n "${BASE_PATH}" ]; then
   [ "${REMOTE}" -eq 1 ] && rm -f -- "${META_SRC}"
 
   # Komprimierte Remote-Backups werden im Modus "n" lokal ausgepackt (local
-  # decompression), im Modus "c" auf der Gegenseite. zcat muss also auf der
+  # decompression), im Modus "c" auf der Gegenseite. gzip muss also auf der
   # jeweils auspackenden Seite vorhanden sein.
   if [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ]; then
     if [ "$REMOTE_MODE" = "c" ]; then
       if ! execute_remote_command "command -v gzip > /dev/null 2>&1"; then
-        echo "Fehler: Das Backup ist komprimiert und -r c verlangt zcat (gzip) auf ${REMOTE_HOST}, dort ist es nicht verfügbar."
+        echo "Fehler: Das Backup ist komprimiert und -r c verlangt gzip auf ${REMOTE_HOST}, dort ist es nicht verfügbar."
         close_ssh_connection
         exit 1
       fi
     elif ! command -v gzip > /dev/null 2>&1; then
-      echo "Fehler: Das Backup ist komprimiert, aber zcat (gzip) ist lokal nicht verfügbar."
+      echo "Fehler: Das Backup ist komprimiert, aber gzip ist lokal nicht verfügbar."
       close_ssh_connection
       exit 1
     fi

@@ -5,7 +5,7 @@
 # Flow: read and validate metadata and parts; prepare the target; restore all
 # segments; collect local and remote worker results.
 
-# Fehler in zcat-/dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
+# Fehler in gzip-/dd-/nc-Pipelines sollen den Exit-Code der Pipeline bestimmen,
 # sonst zählt nur der letzte Befehl (z.B. ein erfolgreiches dd of=...).
 set -o pipefail
 # Resolve symlinked entry points (e.g. /usr/local/bin/ddpar) to the install dir.
@@ -40,7 +40,7 @@ function show_help {
   echo "-r [nc]                 Remote-Restore über SSH+Netcat. Komprimierte Backups werden"
   echo "                        unterstützt. Remote-Optionen:"
   echo "                          n (Default): der Remote-Host sendet die .gz-Teile unverändert,"
-  echo "                            zcat läuft lokal (local decompression, kein gzip auf der Gegenseite)"
+  echo "                            gzip -dc läuft lokal (local decompression, kein gzip auf der Gegenseite)"
   echo "                          c: der Remote-Host packt die .gz-Teile selbst aus (remote decompression),"
   echo "                            über netcat gehen die Rohdaten; dort wird gzip benötigt"
   echo "-R user@host            Angabe des Remote-Host, auf dem das Backup liegt"
@@ -337,7 +337,7 @@ function restore_split_image {
       nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" </dev/null | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
     elif [ $REMOTE -eq 1 ] && [ -n "$COMPRESSION" ]; then
       # Remote netcat restore mit lokaler Dekompression: der Remote-Host sendet
-      # die .gz-Datei unverändert, zcat läuft auf DIESER Maschine. Über das Netz
+      # die .gz-Datei unverändert, gzip -dc läuft auf DIESER Maschine. Über das Netz
       # geht nur der komprimierte Strom, die Remote-Seite benötigt kein gzip.
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is remote (compressed, local decompression)"
@@ -347,7 +347,7 @@ function restore_split_image {
         INTERNAL_EXITCODE=1
         break
       fi
-      echo "nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT} </dev/null | zcat | ${dd_out[*]}"
+      echo "nc ${REMOTE_ADDRESS} ${CURRENT_REMOTE_PORT} </dev/null | gzip -dc | ${dd_out[*]}"
       nc -w "${NETWORK_TIMEOUT}" "${REMOTE_ADDRESS}" "${CURRENT_REMOTE_PORT}" </dev/null | gzip -dc | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
     elif [ $REMOTE -eq 1 ]; then
       # Remote netcat restore, unkomprimiert: Remote sendet, lokal wird empfangen und geschrieben
@@ -365,7 +365,7 @@ function restore_split_image {
       if [ $PART_NUM -eq 0 ]; then
         echo "Source is compressed"
       fi
-      echo "zcat ${INPUT_FILES}${PART_NUM}.gz | ${dd_out[*]}"
+      echo "gzip -dc -- ${INPUT_FILES}${PART_NUM}.gz | ${dd_out[*]}"
       gzip -dc -- "${INPUT_FILES}${PART_NUM}.gz" | ddpar_write_segment "${OUTPUT_FILE}" "${COUNT_BYTES}" "${START}" &
     else
       if [ $PART_NUM -eq 0 ]; then
@@ -416,18 +416,18 @@ fi
 
 # Komprimierte Backups werden im Remote-Modus "n" (und lokal) auf DIESER
 # Maschine ausgepackt (local decompression); im Remote-Modus "c" übernimmt das
-# der Remote-Host (remote decompression). zcat muss also auf der jeweils
+# der Remote-Host (remote decompression). gzip muss also auf der jeweils
 # auspackenden Seite vorhanden sein.
 if [ -n "$COMPRESSION" ]; then
   if [ $REMOTE -eq 1 ] && [ "$REMOTE_MODE" = "c" ]; then
     if ! execute_remote_command "command -v gzip > /dev/null 2>&1"; then
-      echo "Fehler: Das Backup ist komprimiert und -r c verlangt zcat (gzip) auf ${REMOTE_HOST}, dort ist es nicht verfügbar."
+      echo "Fehler: Das Backup ist komprimiert und -r c verlangt gzip auf ${REMOTE_HOST}, dort ist es nicht verfügbar."
       rm -f "$METADATA_SRC"
       close_ssh_connection
       exit 1
     fi
   elif ! command -v gzip > /dev/null 2>&1; then
-    echo "Fehler: Das Backup ist komprimiert, aber zcat (gzip) ist lokal nicht verfügbar."
+    echo "Fehler: Das Backup ist komprimiert, aber gzip ist lokal nicht verfügbar."
     if [ $REMOTE -eq 1 ]; then
       rm -f "$METADATA_SRC"
       close_ssh_connection

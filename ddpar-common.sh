@@ -293,7 +293,7 @@ is_ssh_socket_alive() {
 }
 
 # The remote login shell need not be Bash; explicitly enable pipefail in Bash
-# so a failed dd/zcat cannot be masked by a successful sha256sum.
+# so a failed dd/gzip cannot be masked by a successful sha256sum.
 execute_remote_command() {
   ssh -n -S "${SSH_SOCKET_PATH}" "${REMOTE_HOST}" "bash -o pipefail -c $(shell_quote "${1}")"
 }

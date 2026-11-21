@@ -8,6 +8,7 @@
 - Korrekturen für gruppierte Optionen, die SSH-Passwortabfrage im Debug-Modus und die TCP-Portprüfung.
 - Die Bash-Completion unterstützt ältere und aktuelle Hilfsfunktionen. Der Pakettest prüft den tatsächlich registrierten Handler.
 - Der Docker-Test verwendet eigene SSH-Schlüssel je Container und wertet den Exitstatus aller Vergleiche aus. GitHub Actions prüft den Zwei-Container-Aufbau.
+- Review-Nachkorrekturen: Diagnoseausgaben, Fehlermeldungen und Hilfetexte nennen das tatsächlich verwendete `gzip -dc` statt `zcat`; die Remote-Testvoraussetzung verlangt nur noch `gzip`. Die Hilfe von `ddpar.sh` ist wieder spaltenbündig, der Paket-Changelog nennt den Paketbetreuer und der Kopfkommentar des Docker-Runners beschreibt dessen CI-Einsatz.
 
 ## [1.1.0] – Bash-Completion und Debian-Paket
 

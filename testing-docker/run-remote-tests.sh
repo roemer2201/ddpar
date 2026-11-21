@@ -6,10 +6,11 @@
 # (SSH + netcat, Modi n und c) von source -> target aus und prüft die Integrität per
 # SHA256. Liefert einen Exitcode (0 = alles bestanden, 1 = mindestens ein Fehler).
 #
-# Dies ist ein MANUELLES Werkzeug (nicht Teil der GitHub-Actions-CI), gedacht zum
-# Nachtesten nach Code-Änderungen an den ddpar-Skripten. Die Skripte werden
-# read-only aus dem Repo-Root in die Container gemountet, ein Rebuild ist nach
-# Skriptänderungen also nicht nötig (--no-build nutzen).
+# Der GitHub-Actions-Job "Docker two-host round trips" führt dieses Skript mit
+# einer 4-MiB-Datei aus; manuell dient es zum Nachtesten nach Code-Änderungen an
+# den ddpar-Skripten. Die Skripte werden read-only aus dem Repo-Root in die
+# Container gemountet, ein Rebuild ist nach Skriptänderungen also nicht nötig
+# (--no-build nutzen).
 #
 # Version: 1.0.2 (2026-11-19)
 #

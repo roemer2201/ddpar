@@ -144,7 +144,7 @@ Argumente vorgeschlagen, da die Programme keine Positionsargumente akzeptieren.
 
 # Remote-Backup komprimiert (-c): gzip läuft lokal, der Remote-Host braucht kein gzip
 ./ddpar.sh -i /dev/sdb -o /remote/backup -m backup -c -r n -R user@zielhost
-# Restore daraus: zcat läuft ebenfalls lokal (die Kompression steht in den Metadaten)
+# Restore daraus: gzip -dc läuft ebenfalls lokal (die Kompression steht in den Metadaten)
 ./ddpar-restore.sh -i /remote/backup/sdb -o /dev/sdc -r n -R user@zielhost
 
 # Dasselbe mit Kompression auf der Gegenseite (-r c): dort wird gzip benötigt
@@ -162,12 +162,12 @@ Argumente vorgeschlagen, da die Programme keine Positionsargumente akzeptieren.
 `.gz`-Teile sind identisch, ein Backup aus einem Modus lässt sich also im
 jeweils anderen wiederherstellen und prüfen:
 
-- **`-r n` — *local [de]compression*:** `gzip` bzw. `zcat` laufen auf der
+- **`-r n` — *local [de]compression*:** `gzip` bzw. `gzip -dc` laufen auf der
   lokalen Maschine, über das Netz geht nur der komprimierte Strom, die
   Gegenseite schreibt bzw. liest die `.gz`-Teile mit `dd`. Das spart Bandbreite
   und setzt auf dem Remote-Host **kein** `gzip` voraus. Beim Check werden die
   `.gz`-Teile über SSH geholt und lokal ausgepackt.
-- **`-r c` — *remote [de]compression*:** `gzip` bzw. `zcat` laufen auf dem
+- **`-r c` — *remote [de]compression*:** `gzip` bzw. `gzip -dc` laufen auf dem
   Remote-Host (dort also **erforderlich**). Beim Backup/Restore gehen die
   Rohdaten über das Netz — das entlastet die lokale CPU, spart aber keine
   Bandbreite. Der Check lässt die Gegenseite auspacken und hashen, es geht nur
