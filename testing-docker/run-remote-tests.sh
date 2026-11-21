@@ -12,14 +12,14 @@
 # Container gemountet, ein Rebuild ist nach Skriptänderungen also nicht nötig
 # (--no-build nutzen).
 #
-# Version: 1.0.2 (2026-11-19)
+# Version: 1.0.3 (2026-11-21)
 #
 # Verwendung:
 #   ./run-remote-tests.sh [--no-build] [--keep] [--verbose] [-h]
 #
 #   --no-build   Vorhandenes Image verwenden, nicht neu bauen
 #   --keep       Container nach dem Lauf nicht herunterfahren (zum Nachsehen)
-#   --verbose    ddpar-Kommando-Output live ausgeben (statt nur bei Fehler)
+#   --verbose    Ausgabe erfolgreicher ddpar-Aufrufe nach ihrem Abschluss anzeigen
 #   -h, --help   Diese Hilfe anzeigen
 
 set -euo pipefail
@@ -37,7 +37,7 @@ while [ $# -gt 0 ]; do
     --keep)     KEEP=1 ;;
     --verbose)  VERBOSE=1 ;;
     -h|--help)
-      sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'
+      sed -n '1d; /^#/!q; s/^# \{0,1\}//p' "${SELF}"
       exit 0
       ;;
     *) echo "Unbekannte Option: $1" >&2; exit 2 ;;

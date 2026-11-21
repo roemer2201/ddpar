@@ -24,3 +24,11 @@ STUB
   [[ "${output}" != *'ALLE Remote-Szenarien bestanden'* ]]
   [[ "${output}" == *'[PASS] Remote-Clone komprimiert'* || "${output}" == *'[PASS] Remote-Clone (-r c -c)'* ]]
 }
+
+@test "Runner help lists the description of every supported option" {
+  vrun "${REPO_ROOT}/testing-docker/run-remote-tests.sh" --help
+  [ "${status}" -eq 0 ]
+  for option in --no-build --keep --verbose '-h, --help'; do
+    grep -Eq "^[[:space:]]*${option}[[:space:]]+[^[:space:]]" <<< "${output}"
+  done
+}
